@@ -1,0 +1,11 @@
+.venv
+.venv/
+__pycache__
+.git
+recordings/
+test/
+tests/
+*.mp3
+*.transcript.txt
+*.wav
+.DS_Store

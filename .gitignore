@@ -1,0 +1,11 @@
+.venv/
+recordings/
+__pycache__/
+*.pyc
+.DS_Store
+*.egg-info/
+.cache/
+*.mp4
+*.txt
+*.mp3
+*.m4a
