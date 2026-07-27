@@ -2,11 +2,10 @@
 
 IMAGE_NAME = meeting-transcriber
 
-# Quick setup: create virtualenv and install dependencies
+# Full setup: installs system deps (ffmpeg/tk), creates virtualenv,
+# and installs Python dependencies. Safe to run on a fresh macOS or Linux machine.
 setup:
-	python3 -m venv .venv
-	.venv/bin/pip install --upgrade pip
-	.venv/bin/pip install -r requirements.txt
+	./setup.sh
 
 # Build the Docker image
 build:

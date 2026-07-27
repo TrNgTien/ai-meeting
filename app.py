@@ -11,20 +11,28 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.*")
 import queue
 import threading
 import tkinter as tk
-from tkinter import filedialog
-from datetime import datetime
+from tkinter import filedialog, messagebox
 from enum import Enum, auto
 from pathlib import Path
 from typing import Optional
 
 import customtkinter as ctk
 
-from recorder import AudioRecorder, LiveChunk, get_input_devices, test_microphone
-from transcriber import Transcriber, WhisperXTranscriber, segments_to_text
+from transcriber import (
+    FINAL_MODEL,
+    FINAL_MODEL_OPTIONS,
+    DownloadCancelled,
+    Transcriber,
+    WhisperXTranscriber,
+    delete_model,
+    ensure_model_downloaded,
+    is_model_downloaded,
+    list_downloaded_whisper_models,
+    model_size_on_disk,
+    segments_to_text,
+)
 
 APP_TITLE = "Meeting Transcriber"
-RECORDINGS_DIR = Path("recordings")
-LIVE_CHUNK_SEC = 25.0
 POLL_MS = 200
 IMPORT_FILETYPES = [
     ("Audio files", "*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.opus *.wma *.mp4"),
@@ -37,8 +45,22 @@ AUDIO_EXTS = {
 
 class AppState(Enum):
     IDLE = auto()
-    RECORDING = auto()
     TRANSCRIBING = auto()
+
+
+def _center_geometry(win: tk.Misc, width: int, height: int, over: Optional[tk.Misc] = None) -> None:
+    """Set win's size and position so it's centered on `over`, or the screen if omitted."""
+    if over is not None:
+        over.update_idletasks()
+        cx = over.winfo_rootx() + over.winfo_width() // 2
+        cy = over.winfo_rooty() + over.winfo_height() // 2
+    else:
+        win.update_idletasks()
+        cx = win.winfo_screenwidth() // 2
+        cy = win.winfo_screenheight() // 2
+    x = max(0, cx - width // 2)
+    y = max(0, cy - height // 2)
+    win.geometry(f"{width}x{height}+{x}+{y}")
 
 
 def _format_bytes(num_bytes: float) -> str:
@@ -57,62 +79,47 @@ class MeetingTranscriberApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title(APP_TITLE)
-        self.geometry("860x640")
+        _center_geometry(self, 860, 640)
         self.minsize(720, 520)
 
         self._state = AppState.IDLE
-        self._models_ready = False
         # Whether the final pass uses PhoWhisper (pure Vietnamese). Disabled for
-        # the "vi+en" mixed mode, which needs multilingual large-v3 to keep
-        # English words instead of Vietnamizing them.
-        self._use_phowhisper = True
-        self._session_dir: Optional[Path] = None
-        self._elapsed_sec = 0.0
-        self._timer_job: Optional[str] = None
+        # the "vi+en" mixed mode (the default), which needs a multilingual
+        # openai-whisper model to keep English words instead of Vietnamizing
+        # them.
+        self._use_phowhisper = False
+        # Raw openai-whisper checkpoint name selected in the Model dropdown
+        # (the dropdown displays a "✓" suffix for already-downloaded models,
+        # so the display label and the real model name are tracked separately).
+        self._selected_model_name = FINAL_MODEL
+        self._model_label_to_name: dict[str, str] = {}
 
-        # Skeleton/loading overlay shown over the transcript area while a final
-        # or import transcription is running.
+        # Skeleton/loading overlay shown over the transcript area while a
+        # transcription is running.
         self._skeleton_job: Optional[str] = None
         self._skeleton_bars: list[ctk.CTkFrame] = []
         self._skeleton_highlight = 0
 
         self._ui_queue: queue.Queue[tuple] = queue.Queue()
-        self._live_worker_busy = threading.Event()
-        self._final_worker_busy = threading.Event()
         self._progress_indeterminate = False
 
-        self._input_devices = get_input_devices()
-        self._device_map = {display_name: dev_id for dev_id, display_name in self._input_devices}
-        self._selected_device_id: Optional[int] = self._input_devices[0][0] if self._input_devices else None
+        # Set while the Manage Models dialog is open, so background downloads
+        # started from the main transcription flow or from that dialog can
+        # refresh its status text/list via the UI queue.
+        self._model_manager_refresh = None
+        self._mm_status_var: Optional[tk.StringVar] = None
+        # name -> cancel signal for downloads started from Manage Models.
+        self._download_cancel_events: dict[str, threading.Event] = {}
 
-        self._recorder = AudioRecorder(
-            chunk_duration_sec=LIVE_CHUNK_SEC,
-            on_chunk=self._on_live_chunk,
-            on_error=self._on_recorder_error,
-            on_level=self._on_mic_level,
-        )
         self._transcriber = Transcriber(language="vi")
         # PhoWhisper-large via WhisperX handles the accurate Vietnamese final
-        # pass; the openai-whisper large-v3 path stays as the fallback.
+        # pass; the openai-whisper path stays as the fallback/mixed-language engine.
         self._final_transcriber = WhisperXTranscriber(language="vi")
 
         self._build_ui()
+        self._update_model_menu_state()
         self.after(POLL_MS, self._poll_ui_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        
-        # Start background model loading/downloading
-        threading.Thread(target=self._initialize_models, daemon=True).start()
-
-    def _initialize_models(self) -> None:
-        # Only warm the small live model so the app is usable quickly. The large
-        # PhoWhisper-large model installs on demand at the first final/import
-        # transcription so it never blocks startup.
-        self._ui_queue.put(("status", "Preparing live model…"))
-        try:
-            self._transcriber.preload_live_model(progress_cb=self._on_download_progress)
-            self._ui_queue.put(("models_ready", None))
-        except Exception as exc:
-            self._ui_queue.put(("error", f"Failed to load models: {exc}"))
 
     def _on_download_progress(self, model_name: str, downloaded: int, total: int) -> None:
         self._ui_queue.put(
@@ -140,102 +147,65 @@ class MeetingTranscriberApp(ctk.CTk):
         lang_label = ctk.CTkLabel(header, text="Language:")
         lang_label.grid(row=1, column=0, sticky="w", padx=(0, 8))
 
-        self.language_var = tk.StringVar(value="vi")
+        self.language_var = tk.StringVar(value="vi+en")
         self.language_menu = ctk.CTkOptionMenu(
             header,
-            values=["vi", "vi+en", "en", "auto"],
+            values=["vi+en", "vi", "en", "auto"],
             variable=self.language_var,
             command=self._on_language_change,
             width=90,
         )
         self.language_menu.grid(row=1, column=1, sticky="w", padx=(0, 16))
 
-        mic_label = ctk.CTkLabel(header, text="Microphone:")
-        mic_label.grid(row=1, column=2, sticky="w", padx=(0, 8))
+        model_label = ctk.CTkLabel(header, text="Model:")
+        model_label.grid(row=1, column=2, sticky="w", padx=(0, 8))
 
-        mic_names = list(self._device_map.keys()) if self._device_map else ["Default Microphone"]
-        self.mic_var = tk.StringVar(value=mic_names[0])
-        self.mic_menu = ctk.CTkOptionMenu(
+        self.model_var = tk.StringVar(value=FINAL_MODEL)
+        self.model_menu = ctk.CTkOptionMenu(
             header,
-            values=mic_names,
-            variable=self.mic_var,
-            command=self._on_device_change,
-            width=230,
+            values=FINAL_MODEL_OPTIONS,
+            variable=self.model_var,
+            command=self._on_model_change,
+            width=160,
         )
-        self.mic_menu.grid(row=1, column=3, sticky="w", padx=(0, 12))
+        self.model_menu.grid(row=1, column=3, sticky="w", padx=(0, 16))
 
-        self.test_mic_button = ctk.CTkButton(
+        self.manage_models_button = ctk.CTkButton(
             header,
-            text="Test Mic",
-            command=self._test_mic,
-            width=90,
+            text="Manage Models…",
+            command=self._open_model_manager,
+            width=130,
             fg_color="gray30",
             hover_color="gray40",
         )
-        self.test_mic_button.grid(row=1, column=4, sticky="w")
+        self.manage_models_button.grid(row=1, column=4, sticky="w")
+
+        model_hint = ctk.CTkLabel(
+            header,
+            text="(used for vi+en / en / auto · ✓ = already downloaded · "
+                 "need another model? Use Manage Models…)",
+            text_color="gray",
+            font=ctk.CTkFont(size=11),
+        )
+        model_hint.grid(row=2, column=0, columnspan=5, sticky="w", pady=(2, 0))
+
+        self._refresh_model_menu_labels()
 
         controls = ctk.CTkFrame(self)
         controls.grid(row=1, column=0, sticky="ew", padx=16, pady=8)
-        controls.grid_columnconfigure(4, weight=1)
-
-        self.start_button = ctk.CTkButton(
-            controls,
-            text="Start",
-            command=self._start_recording,
-            width=110,
-            state="disabled",
-        )
-        self.start_button.grid(row=0, column=0, padx=(0, 8))
-
-        self.stop_button = ctk.CTkButton(
-            controls,
-            text="Stop",
-            command=self._stop_recording,
-            width=110,
-            state="disabled",
-        )
-        self.stop_button.grid(row=0, column=1, padx=(0, 8))
+        controls.grid_columnconfigure(1, weight=1)
 
         self.import_button = ctk.CTkButton(
             controls,
             text="Import Files…",
             command=self._import_file,
-            width=110,
-            state="disabled",
+            width=130,
         )
-        self.import_button.grid(row=0, column=2, padx=(0, 16))
-
-        self.timer_label = ctk.CTkLabel(
-            controls,
-            text="00:00:00",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        )
-        self.timer_label.grid(row=0, column=3, sticky="w", padx=(0, 16))
-
-        # Audio level indicator (VU meter)
-        level_frame = ctk.CTkFrame(controls, fg_color="transparent")
-        level_frame.grid(row=0, column=4, sticky="e", padx=(0, 8))
-
-        self.mic_level_label = ctk.CTkLabel(
-            level_frame,
-            text="Mic: 0%",
-            font=ctk.CTkFont(size=12),
-            text_color="gray",
-        )
-        self.mic_level_label.pack(side="left", padx=(0, 6))
-
-        self.mic_level_bar = ctk.CTkProgressBar(
-            level_frame,
-            width=100,
-            height=12,
-            progress_color="#2ecc71",
-        )
-        self.mic_level_bar.set(0.0)
-        self.mic_level_bar.pack(side="left")
+        self.import_button.grid(row=0, column=0, padx=(0, 16))
 
         self.status_label = ctk.CTkLabel(
             self,
-            text="Checking models...",
+            text="Ready. Import audio file(s) to transcribe.",
             anchor="w",
         )
         self.status_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 4))
@@ -345,36 +315,53 @@ class MeetingTranscriberApp(ctk.CTk):
         self._skeleton_highlight = (self._skeleton_highlight + 1) % len(self._skeleton_bars)
         self._skeleton_job = self.after(140, self._animate_skeleton)
 
-    def _on_device_change(self, choice: str) -> None:
-        self._selected_device_id = self._device_map.get(choice)
-
-    def _test_mic(self) -> None:
-        if self._state != AppState.IDLE:
-            return
-        self.test_mic_button.configure(state="disabled", text="Testing…")
-        self._set_status("Testing microphone for 1.5 seconds… speak now!")
-
-        dev_id = self._selected_device_id
-
-        def worker() -> None:
-            peak = test_microphone(device=dev_id, duration_sec=1.5)
-            self._ui_queue.put(("test_mic_result", peak))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_mic_level(self, peak: float) -> None:
-        self._ui_queue.put(("mic_level", peak))
-
     def _on_language_change(self, value: str) -> None:
         self._apply_language_selection()
+        self._update_model_menu_state()
+
+    def _on_model_change(self, label: str) -> None:
+        self._selected_model_name = self._model_label_to_name.get(label, self._selected_model_name)
+        self._apply_language_selection()
+
+    def _refresh_model_menu_labels(self) -> None:
+        """Rebuild the Model dropdown's display labels with a "✓" suffix for
+        checkpoints already cached on disk, without changing the real
+        selected model name.
+        """
+        labels = []
+        mapping: dict[str, str] = {}
+        for name in FINAL_MODEL_OPTIONS:
+            label = f"{name} ✓" if is_model_downloaded(name) else name
+            labels.append(label)
+            mapping[label] = name
+        self._model_label_to_name = mapping
+
+        self.model_menu.configure(values=labels)
+        current_label = next(
+            (label for label, name in mapping.items() if name == self._selected_model_name),
+            labels[0],
+        )
+        self.model_var.set(current_label)
+
+    def _update_model_menu_state(self) -> None:
+        """Model choice only applies to the openai-whisper path (not PhoWhisper)."""
+        busy = self._state != AppState.IDLE
+        if busy:
+            self.model_menu.configure(state="disabled")
+        else:
+            is_pure_vi = self.language_var.get() == "vi"
+            self.model_menu.configure(state="disabled" if is_pure_vi else "normal")
+        # Manage Models stays open even mid-transcription/download, so users
+        # can free disk space or queue up another model without waiting.
+        self.manage_models_button.configure(state="normal")
 
     def _apply_language_selection(self) -> None:
-        """Translate the UI language choice into transcriber + model routing.
+        """Translate the UI language + model choice into transcriber routing.
 
         "vi" uses PhoWhisper-large (best pure Vietnamese). "vi+en" decodes in
-        Vietnamese but on multilingual large-v3, which keeps embedded English
-        words instead of forcing them into Vietnamese spelling. "en"/"auto" also
-        use large-v3.
+        Vietnamese but on the user-selected multilingual openai-whisper model
+        (default large-v3), which keeps embedded English words instead of
+        forcing them into Vietnamese spelling. "en"/"auto" also use that model.
         """
         value = self.language_var.get()
         if value == "vi+en":
@@ -387,117 +374,189 @@ class MeetingTranscriberApp(ctk.CTk):
             self._transcriber.set_language(value)
             self._use_phowhisper = False
 
+        if not self._use_phowhisper:
+            self._transcriber.set_final_model(self._selected_model_name)
+
+    def _open_model_manager(self) -> None:
+        """Show every openai-whisper model cached on disk: download ones you
+        need, or delete ones you don't. Available even while a transcription/
+        download is running in the background.
+        """
+        win = ctk.CTkToplevel(self)
+        win.title("Manage Local Models")
+        _center_geometry(win, 640, 440, over=self)
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(
+            win,
+            text="Locally cached models",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).pack(anchor="w", padx=16, pady=(16, 4))
+
+        ctk.CTkLabel(
+            win,
+            text="Click Use to make a model the active selection (mirrored in the\n"
+                 "Model dropdown). Download one here to have it ready before you\n"
+                 "transcribe, or delete one you no longer need — deleted models\n"
+                 "re-download automatically the next time you select and use them.",
+            text_color="gray",
+            justify="left",
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        status_var = tk.StringVar(value="")
+        ctk.CTkLabel(win, textvariable=status_var, text_color="gray").pack(
+            anchor="w", padx=16, pady=(0, 8)
+        )
+
+        rows_frame = ctk.CTkScrollableFrame(win)
+        rows_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        rows_frame.grid_columnconfigure(0, weight=1)
+
+        def refresh() -> None:
+            for child in rows_frame.winfo_children():
+                child.destroy()
+
+            extra_downloaded = [
+                n for n in list_downloaded_whisper_models() if n not in FINAL_MODEL_OPTIONS
+            ]
+            names = FINAL_MODEL_OPTIONS + extra_downloaded
+
+            for idx, name in enumerate(names):
+                size = model_size_on_disk(name)
+                downloaded = size > 0
+                is_current = name == self._selected_model_name
+
+                ctk.CTkLabel(
+                    rows_frame,
+                    text=name,
+                    anchor="w",
+                    font=ctk.CTkFont(weight="bold") if is_current else None,
+                ).grid(row=idx, column=0, sticky="w", pady=4, padx=(4, 8))
+                ctk.CTkLabel(
+                    rows_frame,
+                    text=_format_bytes(size) if downloaded else "not downloaded",
+                    anchor="w",
+                    text_color="gray" if not downloaded else None,
+                ).grid(row=idx, column=1, sticky="w", pady=4, padx=(0, 8))
+
+                if is_current:
+                    ctk.CTkLabel(
+                        rows_frame, text="✓ Selected", text_color="#2ecc71"
+                    ).grid(row=idx, column=2, sticky="e", padx=(0, 8), pady=4)
+                else:
+                    # Switching the active model while a transcription is
+                    # running would race with the worker thread reading
+                    # it, so only allow it when idle.
+                    ctk.CTkButton(
+                        rows_frame,
+                        text="Use",
+                        width=70,
+                        fg_color="gray30",
+                        hover_color="gray40",
+                        state="normal" if self._state == AppState.IDLE else "disabled",
+                        command=lambda name=name: do_select(name),
+                    ).grid(row=idx, column=2, sticky="e", padx=(0, 8), pady=4)
+
+                downloading = name in self._download_cancel_events
+                if downloading:
+                    ctk.CTkButton(
+                        rows_frame,
+                        text="Cancel",
+                        width=80,
+                        fg_color="#8b2e2e",
+                        hover_color="#a13a3a",
+                        command=lambda name=name: do_cancel(name),
+                    ).grid(row=idx, column=3, sticky="e", pady=4)
+                elif downloaded:
+                    ctk.CTkButton(
+                        rows_frame,
+                        text="Delete",
+                        width=80,
+                        fg_color="#8b2e2e",
+                        hover_color="#a13a3a",
+                        command=lambda name=name: do_delete(name),
+                    ).grid(row=idx, column=3, sticky="e", pady=4)
+                else:
+                    ctk.CTkButton(
+                        rows_frame,
+                        text="Download",
+                        width=80,
+                        command=lambda name=name: do_download(name),
+                    ).grid(row=idx, column=3, sticky="e", pady=4)
+
+        def do_select(name: str) -> None:
+            self._selected_model_name = name
+            if not self._use_phowhisper:
+                self._transcriber.set_final_model(name)
+            self._refresh_model_menu_labels()
+            refresh()
+
+        def do_delete(name: str) -> None:
+            if not messagebox.askyesno(
+                "Delete model", f"Delete cached model '{name}'?", parent=win
+            ):
+                return
+            delete_model(name)
+            refresh()
+            self._refresh_model_menu_labels()
+
+        def do_download(name: str) -> None:
+            if name in self._download_cancel_events:
+                return
+            cancel_event = threading.Event()
+            self._download_cancel_events[name] = cancel_event
+            status_var.set(f"Downloading {name}…")
+            refresh()
+
+            def worker() -> None:
+                try:
+                    ensure_model_downloaded(
+                        name,
+                        lambda m, d, t: self._ui_queue.put(
+                            ("mm_progress", {"model": m, "downloaded": d, "total": t})
+                        ),
+                        cancel_event=cancel_event,
+                    )
+                    self._ui_queue.put(("mm_download_finished", {"name": name, "status": "done"}))
+                except DownloadCancelled:
+                    self._ui_queue.put(("mm_download_finished", {"name": name, "status": "cancelled"}))
+                except Exception as exc:
+                    self._ui_queue.put(
+                        ("mm_download_finished", {"name": name, "status": "error", "error": str(exc)})
+                    )
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def do_cancel(name: str) -> None:
+            cancel_event = self._download_cancel_events.get(name)
+            if cancel_event is not None:
+                status_var.set(f"Cancelling {name}…")
+                cancel_event.set()
+
+        refresh()
+        self._model_manager_refresh = refresh
+        self._mm_status_var = status_var
+
+        def on_close() -> None:
+            self._model_manager_refresh = None
+            self._mm_status_var = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+        ctk.CTkButton(win, text="Close", command=on_close, width=100).pack(pady=(0, 16))
+
     def _set_state(self, state: AppState) -> None:
         self._state = state
         if state == AppState.IDLE:
-            ready = "normal" if self._models_ready else "disabled"
-            self.start_button.configure(state=ready)
-            self.import_button.configure(state=ready)
-            self.stop_button.configure(state="disabled")
+            self.import_button.configure(state="normal")
             self.language_menu.configure(state="normal")
-            self.mic_menu.configure(state="normal")
-            self.test_mic_button.configure(state="normal")
-            self.mic_level_bar.set(0.0)
-            self.mic_level_label.configure(text="Mic: 0%")
-            self._hide_skeleton()
-        elif state == AppState.RECORDING:
-            self.start_button.configure(state="disabled")
-            self.import_button.configure(state="disabled")
-            self.stop_button.configure(state="normal")
-            self.language_menu.configure(state="disabled")
-            self.mic_menu.configure(state="disabled")
-            self.test_mic_button.configure(state="disabled")
             self._hide_skeleton()
         elif state == AppState.TRANSCRIBING:
-            self.start_button.configure(state="disabled")
             self.import_button.configure(state="disabled")
-            self.stop_button.configure(state="disabled")
             self.language_menu.configure(state="disabled")
-            self.mic_menu.configure(state="disabled")
-            self.test_mic_button.configure(state="disabled")
-            self.mic_level_bar.set(0.0)
-            self.mic_level_label.configure(text="Mic: 0%")
             self._show_skeleton()
-
-    def _start_recording(self) -> None:
-        if self._state != AppState.IDLE:
-            return
-
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        self._session_dir = RECORDINGS_DIR / timestamp
-        self._session_dir.mkdir(parents=True, exist_ok=True)
-
-        self._elapsed_sec = 0.0
-        self._update_timer_label()
-        self.transcript_box.delete("1.0", "end")
-        self.saved_label.configure(text="", text_color="gray")
-        self._set_status("Loading live model…")
-
-        self._apply_language_selection()
-        self._set_state(AppState.RECORDING)
-
-        dev_id = self._selected_device_id
-
-        def preload_and_start() -> None:
-            try:
-                self._recorder.start(self._session_dir, device=dev_id)
-                self._ui_queue.put(("recording_started", None))
-            except Exception as exc:
-                self._ui_queue.put(("error", str(exc)))
-
-        threading.Thread(target=preload_and_start, daemon=True).start()
-
-    def _stop_recording(self) -> None:
-        if self._state != AppState.RECORDING:
-            return
-
-        self._set_state(AppState.TRANSCRIBING)
-        self._set_status("Stopping recording…")
-        self._stop_timer()
-
-        def stop_and_transcribe() -> None:
-            try:
-                wav_path = self._recorder.stop()
-                max_amp = self._recorder.max_amplitude
-                if wav_path is None:
-                    self._ui_queue.put(("error", "No recording found."))
-                    return
-
-                if max_amp < 0.001:
-                    self._ui_queue.put(
-                        (
-                            "silence_warning",
-                            "⚠️ Recorded audio was completely silent (0% volume).\n"
-                            "This usually means macOS has BLOCKED Microphone permissions for your Terminal / IDE.\n"
-                            "Fix: Go to System Settings -> Privacy & Security -> Microphone and enable your terminal app (Cursor / Terminal / iTerm2), then restart.",
-                        )
-                    )
-
-                self._ui_queue.put(("status", "Waiting for live transcription to finish…"))
-                while self._live_worker_busy.is_set():
-                    self._live_worker_busy.wait(timeout=0.2)
-
-                self._final_worker_busy.set()
-                try:
-                    final_text = self._run_final_transcription(wav_path)
-                    transcript_path = wav_path.parent / "transcript.txt"
-                    transcript_path.write_text(final_text, encoding="utf-8")
-                    self._ui_queue.put(
-                        (
-                            "final_done",
-                            {
-                                "text": final_text,
-                                "transcript_path": str(transcript_path),
-                                "wav_path": str(wav_path),
-                            },
-                        )
-                    )
-                finally:
-                    self._final_worker_busy.clear()
-            except Exception as exc:
-                self._ui_queue.put(("error", str(exc)))
-
-        threading.Thread(target=stop_and_transcribe, daemon=True).start()
+        self._update_model_menu_state()
 
     def _setup_dnd(self) -> None:
         """Enable dropping audio files onto the transcript area (best-effort)."""
@@ -515,7 +574,7 @@ class MeetingTranscriberApp(ctk.CTk):
             self.drop_hint.configure(text="")
 
     def _on_drop(self, event) -> None:
-        if self._state != AppState.IDLE or not self._models_ready:
+        if self._state != AppState.IDLE:
             self._set_status("Busy — finish the current task before importing.")
             return
         try:
@@ -525,7 +584,7 @@ class MeetingTranscriberApp(ctk.CTk):
         self._start_batch_transcription([Path(p) for p in raw])
 
     def _import_file(self) -> None:
-        if self._state != AppState.IDLE or not self._models_ready:
+        if self._state != AppState.IDLE:
             return
 
         selected = filedialog.askopenfilenames(
@@ -537,7 +596,7 @@ class MeetingTranscriberApp(ctk.CTk):
         self._start_batch_transcription([Path(p) for p in selected])
 
     def _start_batch_transcription(self, paths: list[Path]) -> None:
-        if self._state != AppState.IDLE or not self._models_ready:
+        if self._state != AppState.IDLE:
             return
 
         audio_paths = [
@@ -553,42 +612,39 @@ class MeetingTranscriberApp(ctk.CTk):
         self.saved_label.configure(text="")
 
         def worker() -> None:
-            self._final_worker_busy.set()
             saved: list[str] = []
             total = len(audio_paths)
-            try:
-                for idx, source in enumerate(audio_paths, start=1):
+            for idx, source in enumerate(audio_paths, start=1):
+                self._ui_queue.put(
+                    ("status", f"Transcribing {idx}/{total}: {source.name}…")
+                )
+                try:
+                    text = self._run_final_transcription(source)
+                except Exception as exc:
                     self._ui_queue.put(
-                        ("status", f"Transcribing {idx}/{total}: {source.name}…")
+                        ("batch_item", {"name": source.name, "text": f"[error: {exc}]"})
                     )
-                    try:
-                        text = self._run_final_transcription(source)
-                    except Exception as exc:
-                        self._ui_queue.put(
-                            ("batch_item", {"name": source.name, "text": f"[error: {exc}]"})
-                        )
-                        continue
-                    transcript_path = source.with_name(source.stem + ".transcript.txt")
-                    transcript_path.write_text(text, encoding="utf-8")
-                    saved.append(str(transcript_path))
-                    self._ui_queue.put(
-                        ("batch_item", {"name": source.name, "text": text})
-                    )
-                self._ui_queue.put(("batch_done", {"count": len(saved), "saved": saved}))
-            finally:
-                self._final_worker_busy.clear()
+                    continue
+                transcript_path = source.with_name(source.stem + ".transcript.txt")
+                transcript_path.write_text(text, encoding="utf-8")
+                saved.append(str(transcript_path))
+                self._ui_queue.put(
+                    ("batch_item", {"name": source.name, "text": text})
+                )
+            self._ui_queue.put(("batch_done", {"count": len(saved), "saved": saved}))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _run_final_transcription(self, wav_path: Path) -> str:
-        """Final pass: PhoWhisper+WhisperX for pure Vietnamese, else large-v3.
+        """Final pass: PhoWhisper+WhisperX for pure Vietnamese, else the
+        selected openai-whisper model.
 
-        Runs in a worker thread. PhoWhisper-large is used only for the "vi" mode
-        (pure Vietnamese); "vi+en"/"en"/"auto" use multilingual large-v3 so
-        code-switched English words survive. For "vi", PhoWhisper-large is
-        installed on demand (downloaded + converted) the first time, with
-        progress reported to the UI; the UI stays responsive because this runs
-        off the main thread.
+        Runs in a worker thread. PhoWhisper-large is used only for the "vi"
+        mode (pure Vietnamese); "vi+en"/"en"/"auto" use the selected
+        multilingual openai-whisper model so code-switched English words
+        survive. Models install on demand (downloaded, and converted for
+        PhoWhisper) the first time, with progress reported to the UI; the UI
+        stays responsive because this runs off the main thread.
         """
         if self._use_phowhisper and self._transcriber.language == "vi":
             try:
@@ -610,36 +666,15 @@ class MeetingTranscriberApp(ctk.CTk):
                     ("hide_progress", None)
                 )
                 self._ui_queue.put(
-                    ("status", f"PhoWhisper failed ({exc}); falling back to large-v3…")
+                    ("status", f"PhoWhisper failed ({exc}); falling back to {self._transcriber.final_model_name}…")
                 )
 
-        self._ui_queue.put(("status", "Running final transcription (large-v3)…"))
+        model_name = self._transcriber.final_model_name
+        self._ui_queue.put(("status", f"Loading model '{model_name}' (downloads on first use)…"))
+        self._transcriber.preload_final_model(progress_cb=self._on_download_progress)
+        self._ui_queue.put(("hide_progress", None))
+        self._ui_queue.put(("status", f"Running final transcription ({model_name})…"))
         return self._transcriber.transcribe_file_to_text(wav_path)
-
-    def _on_live_chunk(self, chunk: LiveChunk) -> None:
-        if self._live_worker_busy.is_set():
-            return
-
-        self._live_worker_busy.set()
-
-        def worker() -> None:
-            try:
-                segments = self._transcriber.transcribe_chunk(
-                    chunk.audio,
-                    offset_sec=chunk.start_sec,
-                )
-                if segments:
-                    text = segments_to_text(segments)
-                    self._ui_queue.put(("live_text", text))
-            except Exception as exc:
-                self._ui_queue.put(("error", str(exc)))
-            finally:
-                self._live_worker_busy.clear()
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_recorder_error(self, exc: Exception) -> None:
-        self._ui_queue.put(("error", str(exc)))
 
     def _poll_ui_queue(self) -> None:
         try:
@@ -651,53 +686,13 @@ class MeetingTranscriberApp(ctk.CTk):
         self.after(POLL_MS, self._poll_ui_queue)
 
     def _handle_ui_event(self, event: str, payload) -> None:
-        if event == "recording_started":
-            self._set_status("Recording… live transcript will appear shortly.")
-            self._start_timer()
-        elif event == "mic_level":
-            peak = float(payload)
-            self.mic_level_bar.set(min(1.0, peak * 3.0))
-            self.mic_level_label.configure(text=f"Mic: {int(peak * 100)}%")
-        elif event == "test_mic_result":
-            peak = float(payload)
-            self.test_mic_button.configure(state="normal", text="Test Mic")
-            if peak >= 0.001:
-                self._set_status(f"✅ Microphone working! Peak volume: {int(peak * 100)}%")
-                self.saved_label.configure(text="", text_color="gray")
-            else:
-                self._set_status("⚠️ Mic captured 0 sound! Check macOS Privacy & Security -> Microphone permissions.")
-                self.saved_label.configure(
-                    text="⚠️ SILENT MIC: macOS is blocking microphone access for your Terminal/IDE.\n"
-                         "Open System Settings -> Privacy & Security -> Microphone -> Enable permission for Terminal/Cursor.",
-                    text_color="red",
-                )
-        elif event == "silence_warning":
-            self.saved_label.configure(text=payload, text_color="red")
-        elif event == "live_text":
-            self._append_transcript(payload)
-            if self._state == AppState.RECORDING:
-                self._set_status("Recording… updating live transcript.")
-        elif event == "status":
+        if event == "status":
             self._set_status(payload)
         elif event == "download_progress":
             self._update_download_progress(payload)
         elif event == "hide_progress":
             self._hide_progress_bar()
-        elif event == "models_ready":
-            self._models_ready = True
-            self.progress_bar.grid_remove()
-            self._set_status("Ready. Press Start to record or Import File to transcribe.")
-            self.start_button.configure(state="normal")
-            self.import_button.configure(state="normal")
-        elif event == "final_done":
-            self._hide_progress_bar()
-            self.transcript_box.delete("1.0", "end")
-            self._append_transcript(payload["text"])
-            self.saved_label.configure(
-                text=f"Saved: {payload['transcript_path']} | {payload['wav_path']}"
-            )
-            self._set_status("Done. Final transcript saved.")
-            self._set_state(AppState.IDLE)
+            self._refresh_model_menu_labels()
         elif event == "batch_item":
             self._hide_skeleton()
             self._append_transcript(f"===== {payload['name']} =====")
@@ -714,8 +709,35 @@ class MeetingTranscriberApp(ctk.CTk):
             self._set_state(AppState.IDLE)
         elif event == "error":
             self._set_status(f"Error: {payload}")
-            self._stop_timer()
             self._set_state(AppState.IDLE)
+        elif event == "mm_progress":
+            if self._mm_status_var is not None:
+                total = int(payload.get("total", 0))
+                downloaded = int(payload.get("downloaded", 0))
+                model = payload.get("model", "")
+                if total > 0:
+                    pct = min(100, downloaded / total * 100)
+                    self._mm_status_var.set(
+                        f"Downloading {model}: {_format_bytes(downloaded)} / "
+                        f"{_format_bytes(total)} ({pct:.0f}%)"
+                    )
+                else:
+                    self._mm_status_var.set(f"Downloading {model}: {_format_bytes(downloaded)}")
+        elif event == "mm_download_finished":
+            name = payload["name"]
+            status = payload["status"]
+            self._download_cancel_events.pop(name, None)
+            if self._mm_status_var is not None:
+                if status == "done":
+                    self._mm_status_var.set(f"{name} downloaded.")
+                elif status == "cancelled":
+                    self._mm_status_var.set(f"Download of {name} cancelled.")
+                else:
+                    self._mm_status_var.set(f"Error downloading {name}: {payload.get('error')}")
+            if status == "done":
+                self._refresh_model_menu_labels()
+            if self._model_manager_refresh is not None:
+                self._model_manager_refresh()
 
     def _append_transcript(self, text: str) -> None:
         if not text:
@@ -762,35 +784,11 @@ class MeetingTranscriberApp(ctk.CTk):
     def _set_status(self, message: str) -> None:
         self.status_label.configure(text=message)
 
-    def _start_timer(self) -> None:
-        self._stop_timer()
-        self._tick_timer()
-
-    def _stop_timer(self) -> None:
-        if self._timer_job is not None:
-            self.after_cancel(self._timer_job)
-            self._timer_job = None
-
-    def _tick_timer(self) -> None:
-        if self._state == AppState.RECORDING:
-            self._elapsed_sec = self._recorder.elapsed_sec
-            self._update_timer_label()
-            self._timer_job = self.after(500, self._tick_timer)
-
-    def _update_timer_label(self) -> None:
-        total = max(0, int(self._elapsed_sec))
-        hours, rem = divmod(total, 3600)
-        minutes, secs = divmod(rem, 60)
-        self.timer_label.configure(text=f"{hours:02d}:{minutes:02d}:{secs:02d}")
-
     def _on_close(self) -> None:
-        if self._state == AppState.RECORDING:
-            self._recorder.stop()
         self.destroy()
 
 
 def main() -> None:
-    RECORDINGS_DIR.mkdir(exist_ok=True)
     app = MeetingTranscriberApp()
     app.mainloop()
 

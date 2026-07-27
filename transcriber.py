@@ -10,6 +10,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.*")
 
 import hashlib
 import os
+import threading
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,8 +19,15 @@ from typing import Callable, Optional
 import numpy as np
 import whisper
 
-LIVE_MODEL = "small"
+
+class DownloadCancelled(Exception):
+    """Raised by ensure_model_downloaded() when cancel_event is set mid-download."""
+
 FINAL_MODEL = "large-v3"
+# Multilingual openai-whisper checkpoints selectable in the UI for the
+# "vi+en" / "en" / "auto" final pass (pure "vi" always uses PhoWhisper-large
+# instead, see WhisperXTranscriber). Ordered roughly fastest -> most accurate.
+FINAL_MODEL_OPTIONS = ["small", "medium", "large-v2", "large-v3", "large-v3-turbo"]
 DEVICE = "cpu"
 # openai-whisper only supports fp16 on CUDA; keep it off for CPU inference.
 USE_FP16 = False
@@ -34,15 +42,70 @@ def _whisper_cache_dir() -> str:
     return os.path.join(os.getenv("XDG_CACHE_HOME", default), "whisper")
 
 
+def whisper_model_path(name: str) -> Optional[Path]:
+    """Local cache path for an openai-whisper checkpoint, or None if unknown."""
+    url = whisper._MODELS.get(name)
+    if url is None:
+        return None
+    return Path(_whisper_cache_dir()) / os.path.basename(url)
+
+
+def is_model_downloaded(name: str) -> bool:
+    path = whisper_model_path(name)
+    return path is not None and path.is_file()
+
+
+def model_size_on_disk(name: str) -> int:
+    """Cached file size in bytes, or 0 if the model isn't downloaded."""
+    path = whisper_model_path(name)
+    if path is not None and path.is_file():
+        return path.stat().st_size
+    return 0
+
+
+def delete_model(name: str) -> bool:
+    """Remove a cached openai-whisper checkpoint from disk.
+
+    Only deletes the local file; the model re-downloads automatically the
+    next time it's selected and used. Returns True if a file was removed.
+    """
+    path = whisper_model_path(name)
+    if path is not None and path.is_file():
+        path.unlink()
+        return True
+    return False
+
+
+def list_downloaded_whisper_models() -> list[str]:
+    """Names of every openai-whisper model with a cached checkpoint on disk.
+
+    Scans the whisper cache dir against whisper's known model registry, so it
+    also picks up models downloaded outside of FINAL_MODEL_OPTIONS (e.g. via
+    the CLI or an older config).
+    """
+    cache_dir = Path(_whisper_cache_dir())
+    if not cache_dir.is_dir():
+        return []
+    return [
+        name
+        for name, url in whisper._MODELS.items()
+        if (cache_dir / os.path.basename(url)).is_file()
+    ]
+
+
 def ensure_model_downloaded(
     name: str,
     progress_cb: Optional[ProgressCallback] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> None:
     """Download the given Whisper model to the cache, reporting progress.
 
     Mirrors ``whisper._download`` but streams progress through ``progress_cb``
     instead of a terminal tqdm bar. After this returns, ``whisper.load_model``
     finds the cached file and loads without re-downloading.
+
+    If `cancel_event` is set while the download is in progress, it stops
+    early, deletes the partial file, and raises `DownloadCancelled`.
     """
     url = whisper._MODELS.get(name)
     if url is None:
@@ -70,6 +133,10 @@ def ensure_model_downloaded(
         if progress_cb:
             progress_cb(name, 0, total)
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                output.close()
+                os.remove(part_target)
+                raise DownloadCancelled(f"Download of '{name}' was cancelled")
             buffer = source.read(1 << 20)  # 1 MiB blocks
             if not buffer:
                 break
@@ -106,41 +173,37 @@ def format_timestamp(seconds: float) -> str:
 
 
 class Transcriber:
-    """Wraps openai-whisper for live chunks and final full-file passes."""
+    """Wraps openai-whisper for the final full-file transcription pass."""
 
     def __init__(
         self,
         *,
-        live_model: str = LIVE_MODEL,
         final_model: str = FINAL_MODEL,
         language: str = "vi",
     ) -> None:
-        self.live_model_name = live_model
         self.final_model_name = final_model
         self.language = language if language != "auto" else None
 
-        self._live_model: Optional[whisper.Whisper] = None
         self._final_model: Optional[whisper.Whisper] = None
 
     def set_language(self, language: str) -> None:
         self.language = language if language != "auto" else None
 
-    def _get_live_model(self) -> "whisper.Whisper":
-        if self._live_model is None:
-            self._live_model = whisper.load_model(self.live_model_name, device=DEVICE)
-        return self._live_model
+    def set_final_model(self, name: str) -> None:
+        """Switch the model used for the full-file final pass.
+
+        Drops the cached loaded model when the name actually changes so the
+        next preload/transcribe call downloads (if needed) and loads the
+        newly selected checkpoint instead of reusing the old one.
+        """
+        if name != self.final_model_name:
+            self.final_model_name = name
+            self._final_model = None
 
     def _get_final_model(self) -> "whisper.Whisper":
         if self._final_model is None:
             self._final_model = whisper.load_model(self.final_model_name, device=DEVICE)
         return self._final_model
-
-    def preload_live_model(
-        self,
-        progress_cb: Optional[ProgressCallback] = None,
-    ) -> None:
-        ensure_model_downloaded(self.live_model_name, progress_cb)
-        self._get_live_model()
 
     def preload_final_model(
         self,
@@ -148,29 +211,6 @@ class Transcriber:
     ) -> None:
         ensure_model_downloaded(self.final_model_name, progress_cb)
         self._get_final_model()
-
-    def transcribe_chunk(
-        self,
-        audio: np.ndarray,
-        *,
-        offset_sec: float = 0.0,
-    ) -> list[TranscriptSegment]:
-        if audio.size == 0:
-            return []
-
-        model = self._get_live_model()
-        result = model.transcribe(
-            np.ascontiguousarray(audio, dtype=np.float32),
-            language=self.language,
-            task="transcribe",
-            fp16=USE_FP16,
-            beam_size=1,
-            best_of=1,
-            # Chunks are transcribed independently, so don't carry text context
-            # across calls to avoid repetition/hallucination on chunk seams.
-            condition_on_previous_text=False,
-        )
-        return self._collect_segments(result, offset_sec=offset_sec)
 
     def transcribe_file(self, wav_path: Path) -> list[TranscriptSegment]:
         model = self._get_final_model()
@@ -226,8 +266,7 @@ WHISPERX_VAD_METHOD = "silero"
 def _load_audio_16k(wav_path: Path) -> np.ndarray:
     """Load a WAV as mono 16 kHz float32 without requiring ffmpeg.
 
-    The recorder already writes 16 kHz mono PCM, so this is usually a plain
-    read. Falls back to whisperx.load_audio (ffmpeg) for other formats.
+    Falls back to whisperx.load_audio (ffmpeg) for formats soundfile can't read.
     """
     try:
         import soundfile as sf

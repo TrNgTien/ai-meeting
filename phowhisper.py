@@ -67,6 +67,30 @@ def is_ready() -> bool:
     return (_ct2_dir() / "model.bin").is_file()
 
 
+def size_on_disk() -> int:
+    """Total bytes cached for PhoWhisper-large (raw snapshot + converted CT2)."""
+    total = 0
+    if _hf_dir().is_dir():
+        total += _dir_size(_hf_dir())
+    if _ct2_dir().is_dir():
+        total += _dir_size(_ct2_dir())
+    return total
+
+
+def delete_cached() -> bool:
+    """Remove cached PhoWhisper-large files (raw snapshot + converted CT2).
+
+    Re-downloads/re-converts automatically the next time it's used. Returns
+    True if anything was removed.
+    """
+    removed = False
+    for path in (_hf_dir(), _ct2_dir()):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            removed = True
+    return removed
+
+
 def _dir_size(path: Path) -> int:
     total = 0
     for root, _dirs, files in os.walk(path):

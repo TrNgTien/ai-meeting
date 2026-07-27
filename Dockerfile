@@ -3,11 +3,9 @@ FROM python:3.10-slim
 # Install system dependencies
 # - ffmpeg: required for whisperx and handling mp3 files
 # - python3-tk: required by tkinterdnd2 and customtkinter
-# - libportaudio2: required by sounddevice
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     python3-tk \
-    libportaudio2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
