@@ -223,6 +223,24 @@ class Transcriber:
         )
         return self._collect_segments(result, offset_sec=0.0)
 
+    def transcribe_audio(
+        self, audio: np.ndarray, offset_sec: float = 0.0
+    ) -> list[TranscriptSegment]:
+        """Transcribe one already-decoded 16 kHz mono chunk.
+
+        offset_sec shifts the returned timestamps back onto the original
+        recording's timeline, so chunks can be merged into one transcript.
+        """
+        model = self._get_final_model()
+        result = model.transcribe(
+            audio,
+            language=self.language,
+            task="transcribe",
+            fp16=USE_FP16,
+            beam_size=5,
+        )
+        return self._collect_segments(result, offset_sec=offset_sec)
+
     def transcribe_file_to_text(self, wav_path: Path) -> str:
         segments = self.transcribe_file(wav_path)
         return segments_to_text(segments)
@@ -340,10 +358,20 @@ class WhisperXTranscriber:
         return self._model
 
     def transcribe_file(self, wav_path: Path) -> list[TranscriptSegment]:
-        model = self._get_model()
         audio = _load_audio_16k(Path(wav_path))
+        return self.transcribe_audio(audio)
+
+    def transcribe_audio(
+        self, audio: np.ndarray, offset_sec: float = 0.0
+    ) -> list[TranscriptSegment]:
+        """Transcribe one already-decoded 16 kHz mono chunk.
+
+        offset_sec shifts the returned timestamps back onto the original
+        recording's timeline, so chunks can be merged into one transcript.
+        """
         if audio.size == 0:
             return []
+        model = self._get_model()
         result = model.transcribe(
             audio,
             batch_size=WHISPERX_BATCH_SIZE,
@@ -356,8 +384,8 @@ class WhisperXTranscriber:
                 continue
             collected.append(
                 TranscriptSegment(
-                    start_sec=float(segment["start"]),
-                    end_sec=float(segment["end"]),
+                    start_sec=offset_sec + float(segment["start"]),
+                    end_sec=offset_sec + float(segment["end"]),
                     text=text,
                 )
             )

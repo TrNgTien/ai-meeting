@@ -9,3 +9,5 @@ __pycache__/
 *.txt
 *.mp3
 *.m4a
+*.transcript.partial.json
+*.transcript.partial.json.tmp

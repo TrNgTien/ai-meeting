@@ -18,6 +18,13 @@ from typing import Optional
 
 import customtkinter as ctk
 
+from chunking import (
+    TranscribeAudio,
+    TranscriptionCancelled,
+    resumable_seconds,
+    transcribe_chunked,
+    transcript_path_for,
+)
 from transcriber import (
     FINAL_MODEL,
     FINAL_MODEL_OPTIONS,
@@ -26,6 +33,7 @@ from transcriber import (
     WhisperXTranscriber,
     delete_model,
     ensure_model_downloaded,
+    format_timestamp,
     is_model_downloaded,
     list_downloaded_whisper_models,
     model_size_on_disk,
@@ -96,6 +104,9 @@ class MeetingTranscriberApp(ctk.CTk):
         self._selected_model_name = FINAL_MODEL
         self._model_label_to_name: dict[str, str] = {}
         self._no_models_downloaded = False
+        # Set by Stop; the chunk loop checks it between chunks and saves the
+        # checkpoint before bailing out.
+        self._cancel_event = threading.Event()
 
         # Skeleton/loading overlay shown over the transcript area while a
         # transcription is running.
@@ -196,7 +207,7 @@ class MeetingTranscriberApp(ctk.CTk):
 
         controls = ctk.CTkFrame(self)
         controls.grid(row=1, column=0, sticky="ew", padx=16, pady=8)
-        controls.grid_columnconfigure(1, weight=1)
+        controls.grid_columnconfigure(2, weight=1)
 
         self.import_button = ctk.CTkButton(
             controls,
@@ -204,7 +215,20 @@ class MeetingTranscriberApp(ctk.CTk):
             command=self._import_file,
             width=130,
         )
-        self.import_button.grid(row=0, column=0, padx=(0, 16))
+        self.import_button.grid(row=0, column=0, padx=(0, 8))
+
+        # Stopping is safe at any point: the finished chunks are already on
+        # disk, so re-importing the file resumes instead of restarting.
+        self.stop_button = ctk.CTkButton(
+            controls,
+            text="Stop",
+            command=self._request_stop,
+            width=90,
+            fg_color="#8b2e2e",
+            hover_color="#a13a3a",
+            state="disabled",
+        )
+        self.stop_button.grid(row=0, column=1, padx=(0, 16))
 
         self.status_label = ctk.CTkLabel(
             self,
@@ -570,12 +594,26 @@ class MeetingTranscriberApp(ctk.CTk):
         if state == AppState.IDLE:
             self.import_button.configure(state="normal")
             self.language_menu.configure(state="normal")
+            self.stop_button.configure(state="disabled", text="Stop")
             self._hide_skeleton()
         elif state == AppState.TRANSCRIBING:
             self.import_button.configure(state="disabled")
             self.language_menu.configure(state="disabled")
+            self.stop_button.configure(state="normal", text="Stop")
             self._show_skeleton()
         self._update_model_menu_state()
+
+    def _request_stop(self) -> None:
+        """Ask the worker to stop after the chunk it is currently transcribing.
+
+        Nothing is lost: chunks finished before this point are already in the
+        checkpoint file, so re-importing resumes from there.
+        """
+        if self._state != AppState.TRANSCRIBING:
+            return
+        self._cancel_event.set()
+        self.stop_button.configure(state="disabled", text="Stopping…")
+        self._set_status("Stopping after the current chunk — progress is saved.")
 
     def _setup_dnd(self) -> None:
         """Enable dropping audio files onto the transcript area (best-effort)."""
@@ -626,6 +664,7 @@ class MeetingTranscriberApp(ctk.CTk):
             return
 
         self._apply_language_selection()
+        self._cancel_event = threading.Event()
         self._set_state(AppState.TRANSCRIBING)
         self.transcript_box.delete("1.0", "end")
         self.saved_label.configure(text="")
@@ -633,37 +672,43 @@ class MeetingTranscriberApp(ctk.CTk):
         def worker() -> None:
             saved: list[str] = []
             total = len(audio_paths)
+            cancelled = False
             for idx, source in enumerate(audio_paths, start=1):
-                self._ui_queue.put(
-                    ("status", f"Transcribing {idx}/{total}: {source.name}…")
-                )
+                label = f"Transcribing {idx}/{total}: {source.name}"
+                self._ui_queue.put(("status", f"{label}…"))
+                self._ui_queue.put(("file_start", source.name))
                 try:
-                    text = self._run_final_transcription(source)
+                    self._run_final_transcription(source, label)
+                except TranscriptionCancelled:
+                    # Chunks finished before this point are already written to
+                    # the transcript file; the remaining files never started.
+                    cancelled = True
+                    break
                 except Exception as exc:
-                    self._ui_queue.put(
-                        ("batch_item", {"name": source.name, "text": f"[error: {exc}]"})
-                    )
+                    self._ui_queue.put(("chunk_text", f"[error: {exc}]"))
                     continue
-                transcript_path = source.with_name(source.stem + ".transcript.txt")
-                transcript_path.write_text(text, encoding="utf-8")
-                saved.append(str(transcript_path))
-                self._ui_queue.put(
-                    ("batch_item", {"name": source.name, "text": text})
-                )
-            self._ui_queue.put(("batch_done", {"count": len(saved), "saved": saved}))
+                # The transcript file is written chunk by chunk by
+                # transcribe_chunked(), so there is nothing to save here.
+                saved.append(str(transcript_path_for(source)))
+            self._ui_queue.put(
+                ("batch_done", {"count": len(saved), "saved": saved, "cancelled": cancelled})
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _run_final_transcription(self, wav_path: Path) -> str:
-        """Final pass: PhoWhisper+WhisperX for pure Vietnamese, else the
-        selected openai-whisper model.
+    def _prepare_engine(self) -> tuple[str, TranscribeAudio]:
+        """Load the engine for the current language/model choice.
 
-        Runs in a worker thread. PhoWhisper-large is used only for the "vi"
-        mode (pure Vietnamese); "vi+en"/"en"/"auto" use the selected
-        multilingual openai-whisper model so code-switched English words
-        survive. Models install on demand (downloaded, and converted for
-        PhoWhisper) the first time, with progress reported to the UI; the UI
-        stays responsive because this runs off the main thread.
+        Returns an identity key (part of the checkpoint fingerprint, so
+        switching model or language never resumes into a transcript produced
+        with different settings) and the per-chunk transcribe callable.
+
+        PhoWhisper-large is used only for the "vi" mode (pure Vietnamese);
+        "vi+en"/"en"/"auto" use the selected multilingual openai-whisper model
+        so code-switched English words survive. Models install on demand
+        (downloaded, and converted for PhoWhisper) the first time, with
+        progress reported to the UI. Runs in the worker thread, so the UI stays
+        responsive.
         """
         if self._use_phowhisper and self._transcriber.language == "vi":
             try:
@@ -676,14 +721,9 @@ class MeetingTranscriberApp(ctk.CTk):
                     status_cb=lambda msg: self._ui_queue.put(("status", msg)),
                 )
                 self._ui_queue.put(("hide_progress", None))
-                self._ui_queue.put(
-                    ("status", "Running final transcription (PhoWhisper + WhisperX)…")
-                )
-                return self._final_transcriber.transcribe_file_to_text(wav_path)
+                return "phowhisper-large:vi", self._final_transcriber.transcribe_audio
             except Exception as exc:
-                self._ui_queue.put(
-                    ("hide_progress", None)
-                )
+                self._ui_queue.put(("hide_progress", None))
                 self._ui_queue.put(
                     ("status", f"PhoWhisper failed ({exc}); falling back to {self._transcriber.final_model_name}…")
                 )
@@ -692,8 +732,49 @@ class MeetingTranscriberApp(ctk.CTk):
         self._ui_queue.put(("status", f"Loading model '{model_name}' (downloads on first use)…"))
         self._transcriber.preload_final_model(progress_cb=self._on_download_progress)
         self._ui_queue.put(("hide_progress", None))
-        self._ui_queue.put(("status", f"Running final transcription ({model_name})…"))
-        return self._transcriber.transcribe_file_to_text(wav_path)
+        language = self._transcriber.language or "auto"
+        return f"whisper-{model_name}:{language}", self._transcriber.transcribe_audio
+
+    def _run_final_transcription(self, wav_path: Path, label: str) -> str:
+        """Transcribe one file in chunks, resuming from a checkpoint if present.
+
+        Long meetings are the normal case here, so the file is processed a few
+        minutes at a time and every finished chunk is persisted (see
+        chunking.py). A crash, a quit, or Stop therefore costs at most the
+        chunk in flight rather than the whole recording.
+        """
+        engine_key, transcribe_audio = self._prepare_engine()
+
+        resume_at = resumable_seconds(wav_path, engine_key)
+        if resume_at > 0:
+            self._ui_queue.put(
+                ("status", f"{label} — resuming at {format_timestamp(resume_at)}…")
+            )
+
+        def on_progress(
+            chunk_index: int, chunks_done: int, done_sec: float, total_sec: Optional[float]
+        ) -> None:
+            self._ui_queue.put(
+                (
+                    "chunk_progress",
+                    {
+                        "label": label,
+                        "done_sec": done_sec,
+                        "total_sec": total_sec,
+                        "chunks_done": chunks_done,
+                    },
+                )
+            )
+
+        return transcribe_chunked(
+            wav_path,
+            transcribe_audio=transcribe_audio,
+            engine_key=engine_key,
+            output_path=transcript_path_for(wav_path),
+            on_progress=on_progress,
+            on_text=lambda text: self._ui_queue.put(("chunk_text", text)),
+            cancel_event=self._cancel_event,
+        )
 
     def _poll_ui_queue(self) -> None:
         try:
@@ -712,11 +793,19 @@ class MeetingTranscriberApp(ctk.CTk):
         elif event == "hide_progress":
             self._hide_progress_bar()
             self._refresh_model_menu_labels()
-        elif event == "batch_item":
+        elif event == "file_start":
+            # Keep the skeleton up until real text arrives — loading a model
+            # can take a while before the first chunk lands.
+            if self.transcript_box.index("end-1c") != "1.0":
+                self._append_transcript("\n")  # blank line between files
+            self._append_transcript(f"===== {payload} =====")
+        elif event == "chunk_text":
+            # Each chunk lands here as it is appended to the transcript file,
+            # so a long meeting fills in as it goes instead of at the end.
             self._hide_skeleton()
-            self._append_transcript(f"===== {payload['name']} =====")
-            self._append_transcript(payload["text"])
-            self._append_transcript("")
+            self._append_transcript(payload)
+        elif event == "chunk_progress":
+            self._update_chunk_progress(payload)
         elif event == "batch_done":
             self._hide_progress_bar()
             count = payload["count"]
@@ -724,7 +813,13 @@ class MeetingTranscriberApp(ctk.CTk):
                 self.saved_label.configure(
                     text=f"Saved {count} transcript(s): " + " | ".join(payload["saved"])
                 )
-            self._set_status(f"Done. Transcribed {count} file(s).")
+            if payload.get("cancelled"):
+                self._set_status(
+                    f"Stopped. {count} file(s) finished; partial progress saved — "
+                    "import the same file again to resume."
+                )
+            else:
+                self._set_status(f"Done. Transcribed {count} file(s).")
             self._set_state(AppState.IDLE)
         elif event == "error":
             self._set_status(f"Error: {payload}")
@@ -763,6 +858,34 @@ class MeetingTranscriberApp(ctk.CTk):
             return
         self.transcript_box.insert("end", text if text.endswith("\n") else text + "\n")
         self.transcript_box.see("end")
+
+    def _update_chunk_progress(self, payload: dict) -> None:
+        """Show how far into the recording the transcription has got.
+
+        Unlike the old single-shot pass, chunking gives a real "X of Y minutes
+        transcribed" figure, which matters when a meeting takes a while.
+        """
+        label = payload.get("label", "Transcribing")
+        done_sec = float(payload.get("done_sec", 0.0))
+        total_sec = payload.get("total_sec")
+
+        if not self.progress_bar.winfo_ismapped():
+            self.progress_bar.grid()
+        if self._progress_indeterminate:
+            self.progress_bar.stop()
+            self.progress_bar.configure(mode="determinate")
+            self._progress_indeterminate = False
+
+        if total_sec:
+            self.progress_bar.set(min(1.0, done_sec / float(total_sec)))
+            self._set_status(
+                f"{label} — {format_timestamp(done_sec)} / "
+                f"{format_timestamp(float(total_sec))} transcribed (saved)"
+            )
+        else:
+            self._set_status(
+                f"{label} — {format_timestamp(done_sec)} transcribed (saved)"
+            )
 
     def _update_download_progress(self, payload: dict) -> None:
         model = payload.get("model", "")
@@ -804,6 +927,9 @@ class MeetingTranscriberApp(ctk.CTk):
         self.status_label.configure(text=message)
 
     def _on_close(self) -> None:
+        # The worker is a daemon thread and dies with the process; signalling it
+        # first just gives the in-flight chunk a chance to checkpoint cleanly.
+        self._cancel_event.set()
         self.destroy()
 
 

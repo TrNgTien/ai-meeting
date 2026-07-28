@@ -1,0 +1,363 @@
+"""Chunked, resumable transcription of long recordings.
+
+A one-hour meeting takes a long time to transcribe on CPU, and the old
+one-shot path wrote nothing until the whole file was done — a crash, a quit or
+a power loss at minute 55 threw away all of it.
+
+This module splits the audio into chunks and transcribes them one at a time,
+appending each finished chunk straight to the transcript file. A small sidecar
+checkpoint records how far into the recording that text goes, so re-running the
+same file continues from the last line actually written instead of starting
+over. The transcript is therefore always readable mid-run, and nothing that has
+been transcribed is ever held in memory only.
+
+Chunk boundaries are snapped to the quietest moment near the nominal cut so we
+rarely slice a word in half.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Event
+from typing import Callable, Optional
+
+import numpy as np
+
+from transcriber import TranscriptSegment, segments_to_text
+
+SAMPLE_RATE = 16_000
+
+# Work in 5-minute chunks: long enough that per-chunk model overhead is noise,
+# short enough that a crash costs at most a few minutes of recomputation.
+DEFAULT_CHUNK_SECONDS = 300.0
+# Extra audio decoded past the nominal chunk end, searched for a quiet spot to
+# cut on so chunk boundaries rarely land in the middle of a word.
+SPLIT_SEARCH_SECONDS = 20.0
+# Granularity of the quiet-spot search.
+SPLIT_FRAME_SECONDS = 0.1
+# Ignore a trailing sliver of audio rather than feeding a near-empty chunk to
+# the model.
+MIN_TAIL_SECONDS = 0.2
+
+CHECKPOINT_VERSION = 2
+
+# on_progress(chunk_index, chunks_done, done_seconds, total_seconds|None)
+ProgressCallback = Callable[[int, int, float, Optional[float]], None]
+# on_text(chunk_transcript) — fired as each chunk is appended to the file
+TextCallback = Callable[[str], None]
+# transcribe_audio(audio_16k_mono_float32, offset_sec) -> segments
+TranscribeAudio = Callable[[np.ndarray, float], list[TranscriptSegment]]
+
+
+class TranscriptionCancelled(Exception):
+    """Raised when cancel_event is set. Progress is kept in the checkpoint."""
+
+
+def checkpoint_path(source: Path) -> Path:
+    return source.with_name(source.stem + ".transcript.partial.json")
+
+
+def transcript_path_for(source: Path) -> Path:
+    """Final transcript location: next to the audio it came from."""
+    return source.with_name(source.stem + ".transcript.txt")
+
+
+# --- audio decoding -----------------------------------------------------------
+
+
+def audio_duration(source: Path) -> Optional[float]:
+    """Duration in seconds via ffprobe, or None if it can't be determined.
+
+    None is not fatal: the chunk loop also stops when a decode comes back
+    shorter than requested, which is what happens at the end of the file.
+    """
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=nw=1:nk=1",
+                str(source),
+            ],
+            capture_output=True,
+            check=True,
+        )
+        value = float(out.stdout.decode().strip())
+        return value if value > 0 else None
+    except Exception:
+        return None
+
+
+def decode_range(source: Path, start_sec: float, duration_sec: float) -> np.ndarray:
+    """Decode [start, start+duration) as mono 16 kHz float32 via ffmpeg.
+
+    Decoding a range at a time keeps memory flat regardless of recording
+    length, and avoids loading (and resampling) hours of audio up front.
+    """
+    cmd = [
+        "ffmpeg", "-nostdin", "-threads", "0",
+        "-ss", f"{max(0.0, start_sec):.3f}",
+        "-t", f"{max(0.0, duration_sec):.3f}",
+        "-i", str(source),
+        "-f", "s16le", "-ac", "1", "-acodec", "pcm_s16le",
+        "-ar", str(SAMPLE_RATE),
+        "-",
+    ]
+    try:
+        out = subprocess.run(cmd, capture_output=True, check=True).stdout
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="ignore").strip().splitlines()
+        detail = stderr[-1] if stderr else "unknown ffmpeg error"
+        raise RuntimeError(f"ffmpeg failed to decode {source.name}: {detail}") from exc
+    return np.frombuffer(out, np.int16).astype(np.float32) / 32768.0
+
+
+def find_split_index(audio: np.ndarray, search_from: int) -> int:
+    """Index of the quietest short frame at/after search_from.
+
+    Cutting there instead of at a fixed offset keeps chunk boundaries out of
+    the middle of words most of the time.
+    """
+    if search_from >= audio.size:
+        return audio.size
+
+    frame = max(1, int(SPLIT_FRAME_SECONDS * SAMPLE_RATE))
+    window = audio[search_from:]
+    frame_count = window.size // frame
+    if frame_count <= 0:
+        return audio.size
+
+    frames = window[: frame_count * frame].reshape(frame_count, frame)
+    energy = np.abs(frames).mean(axis=1)
+    quietest = int(energy.argmin())
+    # Cut in the middle of the quiet frame, so neither side clips speech.
+    return search_from + quietest * frame + frame // 2
+
+
+# --- checkpoint ---------------------------------------------------------------
+
+
+@dataclass
+class Checkpoint:
+    """Where to resume, and how much of the transcript file is trustworthy.
+
+    text_bytes is the size the transcript had after the last fully written
+    chunk. Anything past it is the debris of a chunk that was interrupted
+    mid-write, and gets truncated away on resume.
+    """
+
+    fingerprint: str
+    next_start_sec: float
+    chunks_done: int
+    text_bytes: int
+
+    def to_json(self, duration_sec: Optional[float]) -> str:
+        return json.dumps(
+            {
+                "version": CHECKPOINT_VERSION,
+                "fingerprint": self.fingerprint,
+                "duration_sec": duration_sec,
+                "next_start_sec": self.next_start_sec,
+                "chunks_done": self.chunks_done,
+                "text_bytes": self.text_bytes,
+            },
+            ensure_ascii=False,
+        )
+
+
+def source_fingerprint(source: Path, engine_key: str, chunk_sec: float) -> str:
+    """Identity of "this file transcribed this way".
+
+    Any change to the audio file, the engine/model, the language or the chunk
+    size makes an existing checkpoint meaningless, so it is discarded rather
+    than merged into a transcript produced with different settings.
+    """
+    stat = source.stat()
+    return f"{stat.st_size}:{stat.st_mtime_ns}:{engine_key}:{chunk_sec:g}"
+
+
+def load_checkpoint(source: Path, fingerprint: str) -> Optional[Checkpoint]:
+    """Read a resumable checkpoint, or None if absent/stale/corrupt."""
+    path = checkpoint_path(source)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if data.get("version") != CHECKPOINT_VERSION:
+        return None
+    if data.get("fingerprint") != fingerprint:
+        return None
+
+    try:
+        return Checkpoint(
+            fingerprint=fingerprint,
+            next_start_sec=float(data["next_start_sec"]),
+            chunks_done=int(data["chunks_done"]),
+            text_bytes=int(data["text_bytes"]),
+        )
+    except Exception:
+        # A truncated/garbled checkpoint is worth less than the time it would
+        # cost to debug: redo the file rather than emit a corrupt transcript.
+        return None
+
+
+def _tmp_path(path: Path) -> Path:
+    return path.with_name(path.name + ".tmp")
+
+
+def save_checkpoint(
+    source: Path, checkpoint: Checkpoint, duration_sec: Optional[float]
+) -> None:
+    """Write the checkpoint atomically so a crash mid-write can't corrupt it."""
+    path = checkpoint_path(source)
+    tmp = _tmp_path(path)
+    tmp.write_text(checkpoint.to_json(duration_sec), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def clear_checkpoint(source: Path) -> None:
+    path = checkpoint_path(source)
+    for candidate in (path, _tmp_path(path)):
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
+
+
+# --- orchestration ------------------------------------------------------------
+
+
+def transcribe_chunked(
+    source: Path,
+    *,
+    transcribe_audio: TranscribeAudio,
+    engine_key: str,
+    chunk_sec: float = DEFAULT_CHUNK_SECONDS,
+    output_path: Optional[Path] = None,
+    on_progress: Optional[ProgressCallback] = None,
+    on_text: Optional[TextCallback] = None,
+    cancel_event: Optional[Event] = None,
+) -> str:
+    """Transcribe `source` chunk by chunk, streaming the text to disk.
+
+    Every chunk is appended to the transcript file and flushed before the
+    checkpoint records it, so the file on disk is always a complete prefix of
+    the transcript — readable while the run is still going. Interrupting (crash,
+    Stop, power loss) costs at most the chunk in flight; the next run truncates
+    any half-written tail and continues from there.
+
+    Returns the full transcript text. Raises TranscriptionCancelled if
+    cancel_event is set.
+    """
+    fingerprint = source_fingerprint(source, engine_key, chunk_sec)
+    duration = audio_duration(source)
+    out_path = output_path if output_path is not None else transcript_path_for(source)
+
+    state = _resume_or_restart(source, out_path, fingerprint)
+    if state.chunks_done:
+        # Hand the caller what was transcribed in earlier runs, so a resumed
+        # file reads as one transcript rather than starting mid-meeting.
+        if on_text is not None:
+            resumed = out_path.read_text(encoding="utf-8")
+            if resumed:
+                on_text(resumed)
+        if on_progress is not None:
+            on_progress(state.chunks_done, state.chunks_done, state.next_start_sec, duration)
+
+    while duration is None or state.next_start_sec < duration - MIN_TAIL_SECONDS:
+        if cancel_event is not None and cancel_event.is_set():
+            raise TranscriptionCancelled()
+
+        start = state.next_start_sec
+        audio = decode_range(source, start, chunk_sec + SPLIT_SEARCH_SECONDS)
+        if audio.size <= int(MIN_TAIL_SECONDS * SAMPLE_RATE):
+            break
+
+        nominal_end = int(chunk_sec * SAMPLE_RATE)
+        if audio.size > nominal_end:
+            cut = min(find_split_index(audio, nominal_end), audio.size)
+        else:
+            # Short read: this is the tail of the recording.
+            cut = audio.size
+
+        text = segments_to_text(transcribe_audio(audio[:cut], start))
+
+        # Order matters: the text hits the disk first, and only a chunk the
+        # checkpoint has accounted for is treated as done. A crash in between
+        # leaves a tail past text_bytes, which the next run truncates and
+        # redoes — never a silently missing stretch of the meeting.
+        written = _append_text(out_path, text)
+        state.chunks_done += 1
+        state.next_start_sec = start + cut / SAMPLE_RATE
+        state.text_bytes = written
+        save_checkpoint(source, state, duration)
+
+        if on_text is not None and text:
+            on_text(text)
+        if on_progress is not None:
+            on_progress(state.chunks_done, state.chunks_done, state.next_start_sec, duration)
+
+        if cut >= audio.size and (
+            duration is None or state.next_start_sec >= duration - MIN_TAIL_SECONDS
+        ):
+            break
+
+    clear_checkpoint(source)
+    return out_path.read_text(encoding="utf-8")
+
+
+def _resume_or_restart(source: Path, out_path: Path, fingerprint: str) -> Checkpoint:
+    """Set up the transcript file for this run and say where to start.
+
+    Resuming trims the transcript back to the last checkpointed chunk. If the
+    transcript is missing or shorter than the checkpoint claims (deleted or
+    edited between runs), the checkpoint is meaningless and the file starts
+    over from silence rather than resuming into a gap.
+    """
+    state = load_checkpoint(source, fingerprint)
+    if state is not None and state.chunks_done:
+        try:
+            if out_path.stat().st_size >= state.text_bytes:
+                with out_path.open("r+b") as handle:
+                    handle.truncate(state.text_bytes)
+                return state
+        except OSError:
+            pass
+
+    clear_checkpoint(source)
+    out_path.write_bytes(b"")
+    return Checkpoint(
+        fingerprint=fingerprint, next_start_sec=0.0, chunks_done=0, text_bytes=0
+    )
+
+
+def _append_text(out_path: Path, text: str) -> int:
+    """Append one chunk's transcript and force it to disk; return the new size.
+
+    fsync is the point of the exercise: without it a crash could lose text the
+    checkpoint has already recorded as written.
+    """
+    with out_path.open("ab") as handle:
+        if text:
+            handle.write(text.encode("utf-8"))
+        handle.flush()
+        os.fsync(handle.fileno())
+        return handle.tell()
+
+
+def resumable_seconds(source: Path, engine_key: str, chunk_sec: float = DEFAULT_CHUNK_SECONDS) -> float:
+    """Seconds of audio already transcribed in a usable checkpoint (0 if none).
+
+    Used only to tell the user "resuming at 25:00" before work restarts.
+    """
+    try:
+        fingerprint = source_fingerprint(source, engine_key, chunk_sec)
+    except OSError:
+        return 0.0
+    state = load_checkpoint(source, fingerprint)
+    return state.next_start_sec if state else 0.0
