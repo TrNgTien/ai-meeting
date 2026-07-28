@@ -11,3 +11,4 @@ __pycache__/
 *.m4a
 *.transcript.partial.json
 *.transcript.partial.json.tmp
+!.data/*.mp3

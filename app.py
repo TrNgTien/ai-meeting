@@ -9,7 +9,10 @@ warnings.filterwarnings("ignore", message=".*torchcodec.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.*")
 
 import queue
+import subprocess
+import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from enum import Enum, auto
@@ -18,7 +21,9 @@ from typing import Optional
 
 import customtkinter as ctk
 
+import mlx_engine
 from chunking import (
+    DEFAULT_CHUNK_SECONDS,
     TranscribeAudio,
     TranscriptionCancelled,
     resumable_seconds,
@@ -53,6 +58,14 @@ AUDIO_EXTS = {
 # Placeholder shown in the Model dropdown when no checkpoint is cached on disk.
 NO_MODELS_LABEL = "No models downloaded"
 
+# A chunk of audio takes minutes to transcribe on CPU, and nothing lands in the
+# UI until it finishes — long enough that a working app looks hung. A ticker
+# repaints the detail line while a chunk is in flight; this is its cadence,
+# slow enough that the animation reads as a pulse rather than a flicker.
+LIVE_TICK_MS = 400
+
+REVEAL_LABEL = "Reveal in Finder" if sys.platform == "darwin" else "Show in Folder"
+
 
 class AppState(Enum):
     IDLE = auto()
@@ -82,6 +95,55 @@ def _format_bytes(num_bytes: float) -> str:
     return f"{num_bytes:.1f} PB"
 
 
+def _format_duration(seconds: float) -> str:
+    """Wall-clock durations for the live status line: 45s, 4m32s, 2h11m."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
+def _ellipsize(text: str, limit: int = 52) -> str:
+    """Shorten from the middle, keeping the start and the extension readable.
+
+    Recording filenames routinely run past the width of the status line; the
+    tail matters as much as the head when several are named alike.
+    """
+    if len(text) <= limit:
+        return text
+    head = (limit - 1) // 2
+    return f"{text[:head]}…{text[-(limit - 1 - head):]}"
+
+
+def _shorten_home(path: Path) -> str:
+    """/Users/me/Downloads -> ~/Downloads, for display only."""
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
+def reveal_in_file_manager(paths: list[Path]) -> None:
+    """Open the OS file manager with `paths` selected.
+
+    macOS and Windows can highlight the files themselves; elsewhere the best
+    we can portably do is open the containing folder.
+    """
+    existing = [p for p in paths if p.exists()]
+    if not existing:
+        return
+    if sys.platform == "darwin":
+        subprocess.run(["open", "-R", *[str(p) for p in existing]], check=False)
+    elif sys.platform == "win32":
+        # explorer only selects one file per invocation.
+        subprocess.run(["explorer", f"/select,{existing[0]}"], check=False)
+    else:
+        folders = list(dict.fromkeys(str(p.parent) for p in existing))
+        subprocess.run(["xdg-open", folders[0]], check=False)
+
+
 class MeetingTranscriberApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -104,6 +166,11 @@ class MeetingTranscriberApp(ctk.CTk):
         self._selected_model_name = FINAL_MODEL
         self._model_label_to_name: dict[str, str] = {}
         self._no_models_downloaded = False
+        # True once the user picks a model themselves, after which we stop
+        # steering the selection toward whatever is already cached.
+        self._model_explicitly_chosen = False
+        # Decode on the Apple GPU when the machine and the install allow it.
+        self._use_mlx = mlx_engine.is_available()
         # Set by Stop; the chunk loop checks it between chunks and saves the
         # checkpoint before bailing out.
         self._cancel_event = threading.Event()
@@ -116,6 +183,29 @@ class MeetingTranscriberApp(ctk.CTk):
 
         self._ui_queue: queue.Queue[tuple] = queue.Queue()
         self._progress_indeterminate = False
+
+        # Preview lines for the chunk in flight carry the "preview" tag in the
+        # transcript box: they come straight off the model and are not on disk
+        # yet, so they are replaced by the chunk's saved text once it lands and
+        # thrown away if the run stops before then. The tag is the bookkeeping
+        # — its range is exactly the text that has to go.
+
+        # Live "still working" ticker. The worker only reports at chunk
+        # boundaries (minutes apart), so the UI thread animates the gap itself:
+        # elapsed time on the chunk in flight, plus an ETA once this run has
+        # timed at least one chunk and knows how fast the machine actually is.
+        self._live_job: Optional[str] = None
+        self._live_base = ""          # status text as of the last real report
+        self._live_started: Optional[float] = None  # monotonic, chunk in flight
+        self._live_done_sec = 0.0     # audio seconds already transcribed
+        self._live_total_sec: Optional[float] = None
+        self._live_audio_sec = 0.0    # audio transcribed by this run, for rate
+        self._live_wall_sec = 0.0     # wall time it took, for rate
+        self._live_frame = 0
+        self._live_detail = ""        # small gray line under the status
+        self._status_wraplength = 0
+        # Transcripts written by the last finished batch, for Reveal in Finder.
+        self._saved_paths: list[Path] = []
 
         # Set while the Manage Models dialog is open, so background downloads
         # started from the main transcription flow or from that dialog can
@@ -145,11 +235,11 @@ class MeetingTranscriberApp(ctk.CTk):
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)
+        self.grid_rowconfigure(5, weight=1)
 
         header = ctk.CTkFrame(self)
         header.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
-        header.grid_columnconfigure(3, weight=1)
+        header.grid_columnconfigure(6, weight=1)
 
         title = ctk.CTkLabel(
             header,
@@ -194,14 +284,29 @@ class MeetingTranscriberApp(ctk.CTk):
         )
         self.manage_models_button.grid(row=1, column=4, sticky="w")
 
-        model_hint = ctk.CTkLabel(
+        # Only offered where it can actually run (Apple silicon + mlx-whisper
+        # installed); elsewhere the switch would be a control that does nothing.
+        self.mlx_switch = None
+        if mlx_engine.is_available():
+            self.mlx_var = tk.BooleanVar(value=True)
+            self.mlx_switch = ctk.CTkSwitch(
+                header,
+                text="GPU (MLX)",
+                variable=self.mlx_var,
+                command=self._on_mlx_toggle,
+            )
+            self.mlx_switch.grid(row=1, column=5, sticky="w", padx=(16, 0))
+
+        self.model_hint = ctk.CTkLabel(
             header,
-            text="(used for vi+en / en / auto · only downloaded models are listed · "
-                 "need another model? Use Manage Models…)",
+            text="",
             text_color="gray",
             font=ctk.CTkFont(size=11),
+            anchor="w",
+            justify="left",
         )
-        model_hint.grid(row=2, column=0, columnspan=5, sticky="w", pady=(2, 0))
+        self.model_hint.grid(row=2, column=0, columnspan=6, sticky="w", pady=(2, 0))
+        self._refresh_model_hint()
 
         self._refresh_model_menu_labels()
 
@@ -230,20 +335,39 @@ class MeetingTranscriberApp(ctk.CTk):
         )
         self.stop_button.grid(row=0, column=1, padx=(0, 16))
 
+        # Two lines rather than one: what is happening stays put on top, while
+        # the numbers that change every tick sit below in small gray text. One
+        # combined line grew past the window and got clipped mid-word.
         self.status_label = ctk.CTkLabel(
             self,
             text="Ready. Import audio file(s) to transcribe.",
             anchor="w",
+            justify="left",
         )
-        self.status_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 4))
+        self.status_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 0))
 
-        self.progress_bar = ctk.CTkProgressBar(self)
+        self.detail_label = ctk.CTkLabel(
+            self,
+            text="",
+            anchor="w",
+            justify="left",
+            text_color="gray",
+            font=ctk.CTkFont(size=12),
+        )
+        self.detail_label.grid(row=3, column=0, sticky="ew", padx=16, pady=(1, 4))
+        self.detail_label.grid_remove()
+
+        self.progress_bar = ctk.CTkProgressBar(self, height=8)
         self.progress_bar.set(0.0)
-        self.progress_bar.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self.progress_bar.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
         self.progress_bar.grid_remove()
 
+        # Wrap both status lines to the window instead of letting them run off
+        # the right edge; long filenames are the normal case here.
+        self.bind("<Configure>", self._on_resize)
+
         transcript_frame = ctk.CTkFrame(self)
-        transcript_frame.grid(row=4, column=0, sticky="nsew", padx=16, pady=(0, 8))
+        transcript_frame.grid(row=5, column=0, sticky="nsew", padx=16, pady=(0, 8))
         transcript_frame.grid_columnconfigure(0, weight=1)
         transcript_frame.grid_rowconfigure(1, weight=1)
 
@@ -269,18 +393,36 @@ class MeetingTranscriberApp(ctk.CTk):
         self.transcript_box.grid(
             row=1, column=0, columnspan=2, sticky="nsew", padx=12, pady=(0, 12)
         )
+        # Preview lines are dimmed: they are real transcript text, but not yet
+        # written to the file, and are re-rendered when the chunk is saved.
+        self.transcript_box.tag_config("preview", foreground="gray")
 
         self._build_skeleton(transcript_frame)
 
         self._setup_dnd()
 
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.grid(row=6, column=0, sticky="ew", padx=16, pady=(0, 16))
+        footer.grid_columnconfigure(0, weight=1)
+
         self.saved_label = ctk.CTkLabel(
-            self,
+            footer,
             text="",
             anchor="w",
             text_color="gray",
         )
-        self.saved_label.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 16))
+        self.saved_label.grid(row=0, column=0, sticky="ew")
+
+        # Shown only once transcripts exist on disk: the saved paths are long
+        # and easy to lose in the status line, so offer the one-click way there.
+        self.reveal_button = ctk.CTkButton(
+            footer,
+            text=REVEAL_LABEL,
+            command=self._reveal_saved,
+            width=150,
+        )
+        self.reveal_button.grid(row=0, column=1, padx=(12, 0))
+        self.reveal_button.grid_remove()
 
     def _build_skeleton(self, parent: ctk.CTkFrame) -> None:
         """Create a shimmer skeleton overlay that covers the transcript box."""
@@ -324,6 +466,7 @@ class MeetingTranscriberApp(ctk.CTk):
             return
         self.skeleton_frame.grid()
         self.skeleton_frame.tkraise()
+        self.skeleton_label.configure(text="Transcribing…")
         self._skeleton_highlight = 0
         self._animate_skeleton()
 
@@ -348,13 +491,44 @@ class MeetingTranscriberApp(ctk.CTk):
 
     def _on_model_change(self, label: str) -> None:
         self._selected_model_name = self._model_label_to_name.get(label, self._selected_model_name)
+        self._model_explicitly_chosen = True
         self._apply_language_selection()
+        self._refresh_model_hint()
+
+    def _on_mlx_toggle(self) -> None:
+        """Switch between the GPU and CPU engines.
+
+        The two keep their checkpoints in different caches (mlx-community
+        conversions on the Hub vs openai-whisper .pt files), so the list of
+        offerable models changes with the engine.
+        """
+        self._use_mlx = bool(self.mlx_var.get())
+        self._refresh_model_menu_labels()
+        self._refresh_model_hint()
+
+    def _refresh_model_hint(self) -> None:
+        if self._use_mlx:
+            pending = "" if mlx_engine.is_model_downloaded(self._selected_model_name) else \
+                " · not cached yet, downloads once on first use"
+            text = (
+                "(decoding on the Apple GPU via MLX — used for vi+en / en / auto"
+                f"{pending})"
+            )
+        else:
+            text = (
+                "(used for vi+en / en / auto · only downloaded models are listed · "
+                "need another model? Use Manage Models…)"
+            )
+        self.model_hint.configure(text=text)
 
     def _refresh_model_menu_labels(self) -> None:
-        """Rebuild the Model dropdown so it lists only checkpoints already
-        cached on disk — anything else has to be fetched from Manage Models…
-        first, so offering it here would just stall the next transcription on a
-        multi-GB download.
+        """Rebuild the Model dropdown to match the engine that will run.
+
+        The CPU engine lists only checkpoints already cached on disk — anything
+        else has to be fetched from Manage Models… first, so offering it here
+        would just stall the next transcription on a multi-GB download. The MLX
+        engine has no such dialog and fetches its own converted checkpoints on
+        demand, so every size it supports is offerable.
 
         If the selected model is no longer on disk (deleted from Manage
         Models…), the selection moves to a downloaded one so the dropdown never
@@ -362,8 +536,18 @@ class MeetingTranscriberApp(ctk.CTk):
         dropdown is disabled with a placeholder; the default model is still used
         (and downloaded on demand) if a transcription is started anyway.
         """
-        names = [name for name in FINAL_MODEL_OPTIONS if is_model_downloaded(name)]
-        self._model_label_to_name = {name: name for name in names}
+        if self._use_mlx:
+            names = [n for n in FINAL_MODEL_OPTIONS if mlx_engine.repo_for(n)]
+            cached = [n for n in names if mlx_engine.is_model_downloaded(n)]
+            # Offering a model that isn't there yet is fine — MLX fetches it —
+            # but say so, so nobody starts a transcription and waits on a
+            # multi-GB download they didn't know they'd asked for.
+            labels = {(n if n in cached else f"{n}  (downloads first)"): n for n in names}
+        else:
+            names = [name for name in FINAL_MODEL_OPTIONS if is_model_downloaded(name)]
+            cached = names
+            labels = {name: name for name in names}
+        self._model_label_to_name = labels
         self._no_models_downloaded = not names
 
         if not names:
@@ -372,13 +556,25 @@ class MeetingTranscriberApp(ctk.CTk):
             self._update_model_menu_state()
             return
 
-        if self._selected_model_name not in names:
-            self._selected_model_name = FINAL_MODEL if FINAL_MODEL in names else names[-1]
+        # Move off a model that isn't on disk, unless the user picked it: the
+        # nominal default (large-v3) is a 3 GB fetch under MLX, and silently
+        # defaulting to it means importing a file starts a download instead of
+        # a transcription. An explicit choice is always honoured.
+        drifted = self._selected_model_name not in names
+        unwanted_download = (
+            cached
+            and not self._model_explicitly_chosen
+            and self._selected_model_name not in cached
+        )
+        if drifted or unwanted_download:
+            pool = cached or names
+            self._selected_model_name = FINAL_MODEL if FINAL_MODEL in pool else pool[-1]
             if not self._use_phowhisper:
                 self._transcriber.set_final_model(self._selected_model_name)
 
-        self.model_menu.configure(values=names)
-        self.model_var.set(self._selected_model_name)
+        label_for = {name: label for label, name in labels.items()}
+        self.model_menu.configure(values=list(labels))
+        self.model_var.set(label_for[self._selected_model_name])
         self._update_model_menu_state()
 
     def _update_model_menu_state(self) -> None:
@@ -391,6 +587,10 @@ class MeetingTranscriberApp(ctk.CTk):
         else:
             is_pure_vi = self.language_var.get() == "vi"
             self.model_menu.configure(state="disabled" if is_pure_vi else "normal")
+        if self.mlx_switch is not None:
+            # Switching engines mid-run would invalidate the resume checkpoint,
+            # so the choice is locked for the duration.
+            self.mlx_switch.configure(state="disabled" if busy else "normal")
         # Manage Models stays open even mid-transcription/download, so users
         # can free disk space or queue up another model without waiting.
         self.manage_models_button.configure(state="normal")
@@ -592,6 +792,7 @@ class MeetingTranscriberApp(ctk.CTk):
     def _set_state(self, state: AppState) -> None:
         self._state = state
         if state == AppState.IDLE:
+            self._stop_live()
             self.import_button.configure(state="normal")
             self.language_menu.configure(state="normal")
             self.stop_button.configure(state="disabled", text="Stop")
@@ -665,16 +866,21 @@ class MeetingTranscriberApp(ctk.CTk):
 
         self._apply_language_selection()
         self._cancel_event = threading.Event()
+        self._reset_live()
         self._set_state(AppState.TRANSCRIBING)
         self.transcript_box.delete("1.0", "end")
         self.saved_label.configure(text="")
+        self._saved_paths = []
+        self.reveal_button.grid_remove()
 
         def worker() -> None:
             saved: list[str] = []
             total = len(audio_paths)
             cancelled = False
+            batch_started = time.monotonic()
             for idx, source in enumerate(audio_paths, start=1):
-                label = f"Transcribing {idx}/{total}: {source.name}"
+                counter = f" {idx}/{total}" if total > 1 else ""
+                label = f"Transcribing{counter}: {_ellipsize(source.name)}"
                 self._ui_queue.put(("status", f"{label}…"))
                 self._ui_queue.put(("file_start", source.name))
                 try:
@@ -691,7 +897,15 @@ class MeetingTranscriberApp(ctk.CTk):
                 # transcribe_chunked(), so there is nothing to save here.
                 saved.append(str(transcript_path_for(source)))
             self._ui_queue.put(
-                ("batch_done", {"count": len(saved), "saved": saved, "cancelled": cancelled})
+                (
+                    "batch_done",
+                    {
+                        "count": len(saved),
+                        "saved": saved,
+                        "cancelled": cancelled,
+                        "elapsed_sec": time.monotonic() - batch_started,
+                    },
+                )
             )
 
         threading.Thread(target=worker, daemon=True).start()
@@ -729,6 +943,28 @@ class MeetingTranscriberApp(ctk.CTk):
                 )
 
         model_name = self._transcriber.final_model_name
+
+        # The GPU path, when the machine has one and the user hasn't opted out.
+        # Same weights, an order of magnitude faster than fp32 on the CPU.
+        if self._use_mlx and mlx_engine.repo_for(model_name) is not None:
+            try:
+                engine = mlx_engine.MLXTranscriber(model_name, self._transcriber.language)
+                self._ui_queue.put(
+                    ("status", f"Loading '{model_name}' on the Apple GPU (MLX)…")
+                )
+                engine.preload(
+                    progress_cb=self._on_download_progress,
+                    status_cb=lambda msg: self._ui_queue.put(("status", msg)),
+                )
+                self._ui_queue.put(("hide_progress", None))
+                return engine.engine_key, engine.transcribe_audio
+            except Exception as exc:
+                # Never strand a transcription over an optional accelerator.
+                self._ui_queue.put(("hide_progress", None))
+                self._ui_queue.put(
+                    ("status", f"MLX unavailable ({exc}); using the CPU engine…")
+                )
+
         self._ui_queue.put(("status", f"Loading model '{model_name}' (downloads on first use)…"))
         self._transcriber.preload_final_model(progress_cb=self._on_download_progress)
         self._ui_queue.put(("hide_progress", None))
@@ -747,6 +983,7 @@ class MeetingTranscriberApp(ctk.CTk):
 
         resume_at = resumable_seconds(wav_path, engine_key)
         if resume_at > 0:
+            self._ui_queue.put(("chunk_baseline", resume_at))
             self._ui_queue.put(
                 ("status", f"{label} — resuming at {format_timestamp(resume_at)}…")
             )
@@ -773,6 +1010,9 @@ class MeetingTranscriberApp(ctk.CTk):
             output_path=transcript_path_for(wav_path),
             on_progress=on_progress,
             on_text=lambda text: self._ui_queue.put(("chunk_text", text)),
+            on_segment=lambda segment: self._ui_queue.put(
+                ("segment_text", segment.format_line())
+            ),
             cancel_event=self._cancel_event,
         )
 
@@ -788,6 +1028,11 @@ class MeetingTranscriberApp(ctk.CTk):
     def _handle_ui_event(self, event: str, payload) -> None:
         if event == "status":
             self._set_status(payload)
+            # The skeleton stands in for the transcript until the first chunk
+            # lands, but "Transcribing…" is a lie while a multi-GB model is
+            # still downloading — say what is actually happening.
+            if self._skeleton_job is not None:
+                self.skeleton_label.configure(text=_ellipsize(str(payload), 64))
         elif event == "download_progress":
             self._update_download_progress(payload)
         elif event == "hide_progress":
@@ -796,32 +1041,67 @@ class MeetingTranscriberApp(ctk.CTk):
         elif event == "file_start":
             # Keep the skeleton up until real text arrives — loading a model
             # can take a while before the first chunk lands.
+            self._drop_preview()
             if self.transcript_box.index("end-1c") != "1.0":
                 self._append_transcript("\n")  # blank line between files
             self._append_transcript(f"===== {payload} =====")
+            # Start ticking straight away: model loading happens before the
+            # first chunk and is itself long enough to look like a hang.
+            self._live_done_sec = 0.0
+            self._live_total_sec = None
+            self._start_live(self.status_label.cget("text"))
+        elif event == "chunk_baseline":
+            # Audio a previous run already transcribed. Recorded before any
+            # chunk report so resumed seconds are never mistaken for work done
+            # now, which would make the ETA absurdly optimistic.
+            self._live_done_sec = float(payload)
+        elif event == "segment_text":
+            # A line the model has just finished, while the chunk it belongs to
+            # is still being transcribed. Shown dimmed and replaced verbatim by
+            # the saved text below, so a long chunk reads as it is produced
+            # instead of landing in one lump minutes later.
+            self._hide_skeleton()
+            self._append_transcript(payload, tags="preview")
         elif event == "chunk_text":
             # Each chunk lands here as it is appended to the transcript file,
             # so a long meeting fills in as it goes instead of at the end.
             self._hide_skeleton()
+            self._drop_preview()
             self._append_transcript(payload)
         elif event == "chunk_progress":
             self._update_chunk_progress(payload)
         elif event == "batch_done":
+            self._stop_live()
             self._hide_progress_bar()
+            # Stopping mid-chunk leaves a preview of audio that was never
+            # written; the transcript box must match the file on disk.
+            self._drop_preview()
             count = payload["count"]
             if payload["saved"]:
-                self.saved_label.configure(
-                    text=f"Saved {count} transcript(s): " + " | ".join(payload["saved"])
+                self._saved_paths = [Path(p) for p in payload["saved"]]
+                # The button next to this handles getting there, so name the
+                # folder rather than spell out every full path.
+                folders = list(dict.fromkeys(p.parent for p in self._saved_paths))
+                where = (
+                    _ellipsize(_shorten_home(folders[0]), 44)
+                    if len(folders) == 1
+                    else f"{len(folders)} folders"
                 )
+                noun = "transcript" if count == 1 else "transcripts"
+                self.saved_label.configure(text=f"Saved {count} {noun} to {where}")
+                self.reveal_button.grid()
+            took = _format_duration(payload.get("elapsed_sec", 0.0))
             if payload.get("cancelled"):
                 self._set_status(
-                    f"Stopped. {count} file(s) finished; partial progress saved — "
-                    "import the same file again to resume."
+                    f"Stopped after {took}. {count} file(s) finished; partial "
+                    "progress saved — import the same file again to resume."
                 )
             else:
-                self._set_status(f"Done. Transcribed {count} file(s).")
+                self._set_status(f"Done in {took}. Transcribed {count} file(s).")
             self._set_state(AppState.IDLE)
         elif event == "error":
+            self._stop_live()
+            self._drop_preview()
             self._set_status(f"Error: {payload}")
             self._set_state(AppState.IDLE)
         elif event == "mm_progress":
@@ -853,11 +1133,25 @@ class MeetingTranscriberApp(ctk.CTk):
             if self._model_manager_refresh is not None:
                 self._model_manager_refresh()
 
-    def _append_transcript(self, text: str) -> None:
+    def _append_transcript(self, text: str, tags: Optional[str] = None) -> None:
         if not text:
             return
-        self.transcript_box.insert("end", text if text.endswith("\n") else text + "\n")
+        self.transcript_box.insert(
+            "end", text if text.endswith("\n") else text + "\n", tags
+        )
         self.transcript_box.see("end")
+
+    def _drop_preview(self) -> None:
+        """Remove the un-saved preview lines of the chunk in flight.
+
+        Called before the chunk's saved text is appended — the two cover the
+        same audio, and the file is the version of record — and when a run ends
+        early, where the preview describes work that was never written.
+        """
+        tagged = self.transcript_box.tag_ranges("preview")
+        if not tagged:
+            return
+        self.transcript_box.delete(tagged[0], tagged[-1])
 
     def _update_chunk_progress(self, payload: dict) -> None:
         """Show how far into the recording the transcription has got.
@@ -876,16 +1170,100 @@ class MeetingTranscriberApp(ctk.CTk):
             self.progress_bar.configure(mode="determinate")
             self._progress_indeterminate = False
 
+        # Time the chunk that just finished, so the ETA is based on how fast
+        # this machine and model actually are rather than a guess.
+        if self._live_started is not None and done_sec > self._live_done_sec:
+            self._live_wall_sec += time.monotonic() - self._live_started
+            self._live_audio_sec += done_sec - self._live_done_sec
+
         if total_sec:
-            self.progress_bar.set(min(1.0, done_sec / float(total_sec)))
-            self._set_status(
-                f"{label} — {format_timestamp(done_sec)} / "
-                f"{format_timestamp(float(total_sec))} transcribed (saved)"
+            fraction = min(1.0, done_sec / float(total_sec))
+            self.progress_bar.set(fraction)
+            detail = (
+                f"{format_timestamp(done_sec)} / {format_timestamp(float(total_sec))}"
+                f"  ({fraction * 100:.0f}%)"
             )
         else:
-            self._set_status(
-                f"{label} — {format_timestamp(done_sec)} transcribed (saved)"
-            )
+            detail = f"{format_timestamp(done_sec)} transcribed"
+
+        self._live_done_sec = done_sec
+        self._live_total_sec = float(total_sec) if total_sec else None
+        self._start_live(label, detail)
+
+    # --- live "still working" ticker -------------------------------------
+
+    def _start_live(self, base: str, detail: str = "") -> None:
+        """Begin animating the status of the chunk now in flight."""
+        self._live_base = base
+        self._live_detail = detail
+        self._live_started = time.monotonic()
+        if self._live_job is None:
+            self._tick_live()
+
+    def _stop_live(self) -> None:
+        if self._live_job is not None:
+            self.after_cancel(self._live_job)
+            self._live_job = None
+        self._live_started = None
+
+    def _reset_live(self) -> None:
+        """Clear the throughput samples so a new batch times itself afresh."""
+        self._stop_live()
+        self._live_base = ""
+        self._live_detail = ""
+        self._live_done_sec = 0.0
+        self._live_total_sec = None
+        self._live_audio_sec = 0.0
+        self._live_wall_sec = 0.0
+        self._live_frame = 0
+
+    def _tick_live(self) -> None:
+        """Repaint the detail line so a chunk in flight never looks hung.
+
+        Only the small gray line moves: the headline says what file is being
+        worked on and would just flicker if it were rewritten ten times a
+        second.
+        """
+        if self._live_started is None:
+            self._live_job = None
+            return
+
+        elapsed = time.monotonic() - self._live_started
+        # A growing/shrinking ellipsis reads as motion in any font, unlike the
+        # spinner glyphs, which rendered as garbage in the app's UI font.
+        # Padded to a fixed width so the text after it doesn't jitter sideways.
+        dots = ("." * (self._live_frame % 4)).ljust(3)
+        self._live_frame += 1
+
+        parts = []
+        if self._live_detail:
+            parts.append(self._live_detail)
+        parts.append(f"working {_format_duration(elapsed)}{dots}")
+
+        # Audio seconds transcribed per wall second, measured on this run.
+        rate = self._live_audio_sec / self._live_wall_sec if self._live_wall_sec > 0 else 0.0
+        if rate > 0 and self._live_total_sec:
+            remaining_audio = max(0.0, self._live_total_sec - self._live_done_sec)
+            eta = remaining_audio / rate - elapsed
+            if eta > 0:
+                parts.append(f"~{_format_duration(eta)} left")
+        parts.append("progress saved")
+
+        self.status_label.configure(text=self._live_base)
+        self._set_detail("   ·   ".join(parts))
+
+        # Creep the bar across the chunk in flight, so the progress the user
+        # can see matches the work actually happening between reports.
+        if rate > 0 and self._live_total_sec:
+            in_flight = min(elapsed * rate, DEFAULT_CHUNK_SECONDS)
+            projected = (self._live_done_sec + in_flight) / self._live_total_sec
+            self.progress_bar.set(min(1.0, projected))
+
+        self._live_job = self.after(LIVE_TICK_MS, self._tick_live)
+
+    def _reveal_saved(self) -> None:
+        if self._saved_paths:
+            reveal_in_file_manager(self._saved_paths)
 
     def _update_download_progress(self, payload: dict) -> None:
         model = payload.get("model", "")
@@ -923,13 +1301,43 @@ class MeetingTranscriberApp(ctk.CTk):
         if self.progress_bar.winfo_ismapped():
             self.progress_bar.grid_remove()
 
-    def _set_status(self, message: str) -> None:
+    def _on_resize(self, event) -> None:
+        """Keep the status lines wrapping inside the window as it is resized."""
+        if event.widget is not self:
+            return
+        width = max(200, event.width - 32)  # minus the 16px padding either side
+        if width == self._status_wraplength:
+            return
+        self._status_wraplength = width
+        self.status_label.configure(wraplength=width)
+        self.detail_label.configure(wraplength=width)
+
+    def _set_status(self, message: str, detail: Optional[str] = None) -> None:
+        if self._live_job is not None:
+            # The ticker owns the labels while work is in flight; fold the new
+            # message into what it repaints rather than be overwritten by it.
+            self._live_base = message
+            if detail is not None:
+                self._live_detail = detail
+            return
         self.status_label.configure(text=message)
+        self._set_detail(detail)
+
+    def _set_detail(self, detail: Optional[str]) -> None:
+        if detail:
+            self.detail_label.configure(text=detail)
+            if not self.detail_label.winfo_ismapped():
+                self.detail_label.grid()
+        else:
+            self.detail_label.configure(text="")
+            if self.detail_label.winfo_ismapped():
+                self.detail_label.grid_remove()
 
     def _on_close(self) -> None:
         # The worker is a daemon thread and dies with the process; signalling it
         # first just gives the in-flight chunk a chance to checkpoint cleanly.
         self._cancel_event.set()
+        self._stop_live()
         self.destroy()
 
 

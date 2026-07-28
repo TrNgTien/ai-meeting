@@ -89,7 +89,9 @@ Meeting recordings are usually long, and on CPU a 1-hour file takes a while. So 
 - **Stoppable.** **Stop** ends the run after the current chunk. Files later in the batch aren't started. Nothing is lost.
 - **Self-healing.** If the app died halfway through writing a chunk, the leftover tail past the checkpoint is truncated on the next run and that chunk is redone — so you never get a duplicated or half-written line.
 
-The transcript pane fills in the same way, chunk by chunk, and shows the earlier text again when you resume a file.
+The transcript pane fills in faster than the file does: lines appear **while the chunk is still being transcribed**, dimmed, as the model finishes each ~30-second window — you never wait for a whole chunk (let alone the whole recording) to see text. When the chunk is saved, those dimmed lines are replaced by the text that actually went to disk, so what you read always ends at the last saved line. Stopping mid-chunk drops the dimmed preview, because that audio was never written. Resuming a file shows the earlier text again first.
+
+(Preview lines need an engine that reports as it decodes: `vi+en`/`en`/`auto` on either whisper engine do; `vi` mode's PhoWhisper batches the chunk and fills in chunk by chunk as before.)
 
 A checkpoint is only reused if the audio file, the language mode, and the model all still match. Change the model (or edit the audio) and the stale checkpoint is discarded and the file restarts, so a transcript never mixes output from two different models.
 
@@ -113,7 +115,7 @@ Click **Manage Models…** to see disk usage and control downloads. It stays usa
 ## Tips & troubleshooting
 
 - **First run of any model is slow.** It's downloading. Subsequent runs are fully offline.
-- **Transcription seems stuck.** Watch the `mm:ss / mm:ss transcribed` counter — it advances once per ~5-minute chunk. Everything runs on CPU (`DEVICE = "cpu"`), so `large-v3` with beam search is the slowest option by a wide margin; `large-v3-turbo`, or `vi` mode (PhoWhisper is int8 + VAD + batched), are much faster on long recordings.
+- **Transcription seems stuck.** Watch the transcript pane — dimmed lines land every ~30 seconds of audio. The `mm:ss / mm:ss transcribed` counter behind them advances once per ~5-minute chunk. Everything runs on CPU (`DEVICE = "cpu"`), so `large-v3` with beam search is the slowest option by a wide margin; `large-v3-turbo`, or `vi` mode (PhoWhisper is int8 + VAD + batched), are much faster on long recordings.
 - **English words come out as Vietnamese phonetics.** You're in `vi` mode — switch to `vi+en`.
 - **Drag-and-drop doesn't work.** It's optional (needs `tkinterdnd2`); the **Import Files…** button always works.
 - **A file failed.** The batch continues, and that file shows `[error: …]` in the transcript pane instead of stopping everything. Its checkpoint is kept, so re-importing retries from where it got to.
@@ -166,11 +168,13 @@ Notes for anyone modifying this:
 
 - Engine routing lives in `MeetingTranscriberApp._apply_language_selection()` and `_prepare_engine()` in `app.py`; `_prepare_engine()` returns `(engine_key, transcribe_audio)` and `chunking.transcribe_chunked()` drives the loop.
 - `engine_key` goes into the checkpoint fingerprint alongside the audio file's size + mtime and the chunk size — mismatches invalidate the checkpoint instead of resuming into it.
-- Both engines expose `transcribe_audio(audio, offset_sec)` taking a 16 kHz mono float32 array; `offset_sec` puts the chunk's timestamps back on the recording's timeline.
+- Both engines expose `transcribe_audio(audio, offset_sec, on_segment=None)` taking a 16 kHz mono float32 array; `offset_sec` puts the chunk's timestamps back on the recording's timeline.
 - Chunk decoding goes through `chunking.decode_range()` (ffmpeg `-ss`/`-t`), which keeps memory flat on long files and bypasses the float64 blow-up in `_load_audio_16k()`'s resampler.
 - Durability order per chunk: append text → `flush` + `os.fsync` → write the checkpoint (`text_bytes` = new file size) atomically. A crash between the two leaves a tail past `text_bytes`; `_resume_or_restart()` truncates to `text_bytes` and redoes that chunk, so recovery is idempotent.
 - Cancellation is a `threading.Event` checked between chunks; the loop raises `TranscriptionCancelled` and the per-chunk checkpoint is already on disk.
-- `on_text` fires per chunk (plus once with the resumed prefix at startup) and drives the live transcript pane via the `chunk_text` UI event.
+- `on_text` fires per chunk (plus once with the resumed prefix at startup) and drives the transcript pane via the `chunk_text` UI event.
+- `on_segment` fires *within* a chunk, per decode window, via the `segment_text` UI event. Neither openai-whisper nor mlx-whisper offers a callback, so `transcriber.stream_segments()` redirects stdout for the duration of the call, runs the engine with `verbose=True`, and parses the `[start --> end] text` lines both print (non-segment output is passed through). It is safe only because one worker thread transcribes at a time; `chunking._accepts_on_segment()` skips engines that can't stream (WhisperX/PhoWhisper batches the chunk).
+- Those preview lines carry the `preview` tag in the transcript box and are **not** on disk. `_drop_preview()` deletes the tag's range before the saved chunk text is appended, and on stop/error — the tag range *is* the bookkeeping, so no index tracking can drift out of sync.
 - Changing the model calls `Transcriber.set_final_model()`, which unloads the current model so the next run loads the new one.
 - `_refresh_model_menu_labels()` rebuilds the header dropdown from the models actually on disk, reassigns `_selected_model_name` if the selected one was deleted, and disables the menu with `NO_MODELS_LABEL` when the cache is empty.
 - Model cache lives in `~/.cache/whisper` (or `$XDG_CACHE_HOME/whisper`); helpers are `is_model_downloaded()`, `model_size_on_disk()`, `delete_model()`, `list_downloaded_whisper_models()`, and `ensure_model_downloaded()` (accepts a `cancel_event`, raises `DownloadCancelled`).

@@ -8,13 +8,17 @@ import warnings
 warnings.filterwarnings("ignore", message=".*torchcodec.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.*")
 
+import contextlib
 import hashlib
+import io
 import os
+import re
+import sys
 import threading
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 import numpy as np
 import whisper
@@ -172,6 +176,122 @@ def format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+# --- live segment streaming ---------------------------------------------------
+
+# on_segment(segment) — fired as the engine finishes each decode window, while
+# the chunk it belongs to is still being transcribed.
+SegmentCallback = Callable[[TranscriptSegment], None]
+
+# Whisper decodes a chunk in ~30s windows and has a finished segment long
+# before the call returns, but neither openai-whisper nor mlx-whisper exposes a
+# callback for it. Both do print each segment when verbose=True, in this exact
+# shape, so tapping that print is the one way to see inside a decode that runs
+# for minutes.
+_VERBOSE_SEGMENT_LINE = re.compile(r"^\[([\d:.]+) --> ([\d:.]+)\]\s?(.*)$")
+
+
+def _parse_clock(value: str) -> float:
+    """Seconds from whisper's `[hh:]mm:ss.mmm` verbose timestamps."""
+    parts = value.split(":")
+    seconds = float(parts[-1])
+    if len(parts) > 1:
+        seconds += int(parts[-2]) * 60
+    if len(parts) > 2:
+        seconds += int(parts[-3]) * 3600
+    return seconds
+
+
+class _SegmentPrintTap(io.TextIOBase):
+    """A stdout stand-in that turns verbose segment prints into callbacks.
+
+    Anything printed that is *not* a segment line is passed through to the real
+    stdout, so warnings from the engine are not swallowed along the way.
+    """
+
+    def __init__(
+        self,
+        on_segment: SegmentCallback,
+        offset_sec: float,
+        passthrough: Optional[io.TextIOBase],
+    ) -> None:
+        self._on_segment = on_segment
+        self._offset = offset_sec
+        self._passthrough = passthrough
+        self._buffer = ""
+
+    def write(self, data: str) -> int:
+        self._buffer += data
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._emit(line)
+        return len(data)
+
+    def flush(self) -> None:
+        if self._passthrough is not None:
+            try:
+                self._passthrough.flush()
+            except Exception:
+                pass
+
+    def close_out(self) -> None:
+        """Emit whatever was written without a trailing newline."""
+        if self._buffer:
+            line, self._buffer = self._buffer, ""
+            self._emit(line)
+
+    def _emit(self, line: str) -> None:
+        match = _VERBOSE_SEGMENT_LINE.match(line.strip())
+        if match is None:
+            if line.strip() and self._passthrough is not None:
+                print(line, file=self._passthrough)
+            return
+
+        text = match.group(3).strip()
+        if not text:
+            return
+        try:
+            start = _parse_clock(match.group(1))
+            end = _parse_clock(match.group(2))
+        except ValueError:
+            return
+
+        try:
+            self._on_segment(
+                TranscriptSegment(
+                    start_sec=self._offset + start,
+                    end_sec=self._offset + end,
+                    text=text,
+                )
+            )
+        except Exception:
+            # Streaming is a preview of work already being done; a consumer
+            # that trips must never take the transcription down with it.
+            pass
+
+
+@contextlib.contextmanager
+def stream_segments(
+    on_segment: Optional[SegmentCallback], offset_sec: float
+) -> Iterator[bool]:
+    """Route verbose segment prints to `on_segment` for the duration.
+
+    Yields whether streaming is on, which the caller passes to the engine as
+    `verbose` — the prints only happen when it is. Redirecting stdout is
+    process-wide, so this is only safe because transcription runs on one worker
+    thread at a time (see app.py); non-segment output is forwarded regardless.
+    """
+    if on_segment is None:
+        yield False
+        return
+
+    tap = _SegmentPrintTap(on_segment, offset_sec, sys.stdout)
+    try:
+        with contextlib.redirect_stdout(tap):
+            yield True
+    finally:
+        tap.close_out()
+
+
 class Transcriber:
     """Wraps openai-whisper for the final full-file transcription pass."""
 
@@ -224,21 +344,29 @@ class Transcriber:
         return self._collect_segments(result, offset_sec=0.0)
 
     def transcribe_audio(
-        self, audio: np.ndarray, offset_sec: float = 0.0
+        self,
+        audio: np.ndarray,
+        offset_sec: float = 0.0,
+        on_segment: Optional[SegmentCallback] = None,
     ) -> list[TranscriptSegment]:
         """Transcribe one already-decoded 16 kHz mono chunk.
 
         offset_sec shifts the returned timestamps back onto the original
         recording's timeline, so chunks can be merged into one transcript.
+
+        on_segment, if given, is called with each segment the moment the model
+        finishes it — minutes before this call returns on a CPU-sized chunk.
         """
         model = self._get_final_model()
-        result = model.transcribe(
-            audio,
-            language=self.language,
-            task="transcribe",
-            fp16=USE_FP16,
-            beam_size=5,
-        )
+        with stream_segments(on_segment, offset_sec) as streaming:
+            result = model.transcribe(
+                audio,
+                language=self.language,
+                task="transcribe",
+                fp16=USE_FP16,
+                beam_size=5,
+                verbose=True if streaming else None,
+            )
         return self._collect_segments(result, offset_sec=offset_sec)
 
     def transcribe_file_to_text(self, wav_path: Path) -> str:
@@ -362,12 +490,19 @@ class WhisperXTranscriber:
         return self.transcribe_audio(audio)
 
     def transcribe_audio(
-        self, audio: np.ndarray, offset_sec: float = 0.0
+        self,
+        audio: np.ndarray,
+        offset_sec: float = 0.0,
+        on_segment: Optional[SegmentCallback] = None,
     ) -> list[TranscriptSegment]:
         """Transcribe one already-decoded 16 kHz mono chunk.
 
         offset_sec shifts the returned timestamps back onto the original
         recording's timeline, so chunks can be merged into one transcript.
+
+        on_segment is accepted for a uniform engine surface but never fired:
+        WhisperX batches the whole chunk through the model and produces
+        nothing until it is done, so there is no partial result to stream.
         """
         if audio.size == 0:
             return []

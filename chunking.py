@@ -17,9 +17,11 @@ rarely slice a word in half.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -27,7 +29,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from transcriber import TranscriptSegment, segments_to_text
+from transcriber import SegmentCallback, TranscriptSegment, segments_to_text
 
 SAMPLE_RATE = 16_000
 
@@ -49,8 +51,10 @@ CHECKPOINT_VERSION = 2
 ProgressCallback = Callable[[int, int, float, Optional[float]], None]
 # on_text(chunk_transcript) — fired as each chunk is appended to the file
 TextCallback = Callable[[str], None]
-# transcribe_audio(audio_16k_mono_float32, offset_sec) -> segments
-TranscribeAudio = Callable[[np.ndarray, float], list[TranscriptSegment]]
+# transcribe_audio(audio_16k_mono_float32, offset_sec, on_segment=…) -> segments
+# The on_segment keyword is optional: engines that cannot produce partial
+# results (see WhisperXTranscriber) simply don't take it.
+TranscribeAudio = Callable[..., list[TranscriptSegment]]
 
 
 class TranscriptionCancelled(Exception):
@@ -206,6 +210,46 @@ def load_checkpoint(source: Path, fingerprint: str) -> Optional[Checkpoint]:
         return None
 
 
+def _format_clock(seconds: float) -> str:
+    """HH:MM:SS — matches the segment timestamps in the transcript body."""
+    total = max(0, int(seconds))
+    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Wall-clock durations, read at a glance: 45s, 4m32s, 3h12m."""
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m{total % 60:02d}s"
+    return f"{total // 3600}h{(total % 3600) // 60:02d}m"
+
+
+def summary_line(
+    audio_sec: Optional[float], run_sec: float, resumed_from_sec: float
+) -> str:
+    """The footer closing a finished transcript.
+
+    Records how much audio it covers and how long the machine took, which is
+    the question anyone asks after leaving a long recording to run. Only the
+    time spent in *this* run is knowable — earlier runs' wall time is not
+    carried in the checkpoint — so a resumed file says so rather than
+    reporting a total it cannot vouch for.
+    """
+    parts = []
+    if audio_sec:
+        parts.append(f"{_format_clock(audio_sec)} of audio")
+    if resumed_from_sec > 0:
+        parts.append(
+            f"transcribed in {_format_elapsed(run_sec)} this run "
+            f"(resumed from {_format_clock(resumed_from_sec)})"
+        )
+    else:
+        parts.append(f"transcribed in {_format_elapsed(run_sec)}")
+    return "----- Complete: " + " · ".join(parts) + " -----\n"
+
+
 def _tmp_path(path: Path) -> Path:
     return path.with_name(path.name + ".tmp")
 
@@ -241,9 +285,15 @@ def transcribe_chunked(
     output_path: Optional[Path] = None,
     on_progress: Optional[ProgressCallback] = None,
     on_text: Optional[TextCallback] = None,
+    on_segment: Optional[SegmentCallback] = None,
     cancel_event: Optional[Event] = None,
 ) -> str:
     """Transcribe `source` chunk by chunk, streaming the text to disk.
+
+    on_segment, if given and supported by the engine, fires for each segment
+    the model finishes *within* the chunk in flight. Those segments are a
+    preview only — nothing is written to disk until the chunk completes — but
+    they are what makes text appear seconds into a run rather than minutes.
 
     Every chunk is appended to the transcript file and flushed before the
     checkpoint records it, so the file on disk is always a complete prefix of
@@ -256,9 +306,12 @@ def transcribe_chunked(
     """
     fingerprint = source_fingerprint(source, engine_key, chunk_sec)
     duration = audio_duration(source)
+    stream_segments = on_segment is not None and _accepts_on_segment(transcribe_audio)
     out_path = output_path if output_path is not None else transcript_path_for(source)
 
     state = _resume_or_restart(source, out_path, fingerprint)
+    run_started = time.monotonic()
+    resumed_from = state.next_start_sec
     if state.chunks_done:
         # Hand the caller what was transcribed in earlier runs, so a resumed
         # file reads as one transcript rather than starting mid-meeting.
@@ -285,7 +338,11 @@ def transcribe_chunked(
             # Short read: this is the tail of the recording.
             cut = audio.size
 
-        text = segments_to_text(transcribe_audio(audio[:cut], start))
+        if stream_segments:
+            segments = transcribe_audio(audio[:cut], start, on_segment=on_segment)
+        else:
+            segments = transcribe_audio(audio[:cut], start)
+        text = segments_to_text(segments)
 
         # Order matters: the text hits the disk first, and only a chunk the
         # checkpoint has accounted for is treated as done. A crash in between
@@ -307,8 +364,35 @@ def transcribe_chunked(
         ):
             break
 
+    # Only a run that reached the end writes the footer, and only after the
+    # last chunk is on disk — so its presence means "this transcript is whole",
+    # and a cancelled run leaves a file the next run can still resume into.
+    summary = summary_line(
+        duration if duration is not None else state.next_start_sec,
+        time.monotonic() - run_started,
+        resumed_from,
+    )
+    _append_text(out_path, "\n" + summary)
+    if on_text is not None:
+        on_text("\n" + summary)
+
     clear_checkpoint(source)
     return out_path.read_text(encoding="utf-8")
+
+
+def _accepts_on_segment(transcribe_audio: TranscribeAudio) -> bool:
+    """Whether this engine can report segments before the chunk is finished.
+
+    Asked once per run rather than caught as a TypeError per chunk, which
+    would just as happily swallow a TypeError raised inside the model.
+    """
+    try:
+        params = inspect.signature(transcribe_audio).parameters
+    except (TypeError, ValueError):
+        return False
+    if "on_segment" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def _resume_or_restart(source: Path, out_path: Path, fingerprint: str) -> Checkpoint:
