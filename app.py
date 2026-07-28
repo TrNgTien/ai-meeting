@@ -42,6 +42,9 @@ AUDIO_EXTS = {
     ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma", ".mp4",
 }
 
+# Placeholder shown in the Model dropdown when no checkpoint is cached on disk.
+NO_MODELS_LABEL = "No models downloaded"
+
 
 class AppState(Enum):
     IDLE = auto()
@@ -88,11 +91,11 @@ class MeetingTranscriberApp(ctk.CTk):
         # openai-whisper model to keep English words instead of Vietnamizing
         # them.
         self._use_phowhisper = False
-        # Raw openai-whisper checkpoint name selected in the Model dropdown
-        # (the dropdown displays a "✓" suffix for already-downloaded models,
-        # so the display label and the real model name are tracked separately).
+        # Raw openai-whisper checkpoint name selected in the Model dropdown,
+        # which lists downloaded models only (see _refresh_model_menu_labels).
         self._selected_model_name = FINAL_MODEL
         self._model_label_to_name: dict[str, str] = {}
+        self._no_models_downloaded = False
 
         # Skeleton/loading overlay shown over the transcript area while a
         # transcription is running.
@@ -182,7 +185,7 @@ class MeetingTranscriberApp(ctk.CTk):
 
         model_hint = ctk.CTkLabel(
             header,
-            text="(used for vi+en / en / auto · ✓ = already downloaded · "
+            text="(used for vi+en / en / auto · only downloaded models are listed · "
                  "need another model? Use Manage Models…)",
             text_color="gray",
             font=ctk.CTkFont(size=11),
@@ -324,29 +327,42 @@ class MeetingTranscriberApp(ctk.CTk):
         self._apply_language_selection()
 
     def _refresh_model_menu_labels(self) -> None:
-        """Rebuild the Model dropdown's display labels with a "✓" suffix for
-        checkpoints already cached on disk, without changing the real
-        selected model name.
-        """
-        labels = []
-        mapping: dict[str, str] = {}
-        for name in FINAL_MODEL_OPTIONS:
-            label = f"{name} ✓" if is_model_downloaded(name) else name
-            labels.append(label)
-            mapping[label] = name
-        self._model_label_to_name = mapping
+        """Rebuild the Model dropdown so it lists only checkpoints already
+        cached on disk — anything else has to be fetched from Manage Models…
+        first, so offering it here would just stall the next transcription on a
+        multi-GB download.
 
-        self.model_menu.configure(values=labels)
-        current_label = next(
-            (label for label, name in mapping.items() if name == self._selected_model_name),
-            labels[0],
-        )
-        self.model_var.set(current_label)
+        If the selected model is no longer on disk (deleted from Manage
+        Models…), the selection moves to a downloaded one so the dropdown never
+        lists something that isn't there. When nothing is downloaded at all the
+        dropdown is disabled with a placeholder; the default model is still used
+        (and downloaded on demand) if a transcription is started anyway.
+        """
+        names = [name for name in FINAL_MODEL_OPTIONS if is_model_downloaded(name)]
+        self._model_label_to_name = {name: name for name in names}
+        self._no_models_downloaded = not names
+
+        if not names:
+            self.model_menu.configure(values=[NO_MODELS_LABEL])
+            self.model_var.set(NO_MODELS_LABEL)
+            self._update_model_menu_state()
+            return
+
+        if self._selected_model_name not in names:
+            self._selected_model_name = FINAL_MODEL if FINAL_MODEL in names else names[-1]
+            if not self._use_phowhisper:
+                self._transcriber.set_final_model(self._selected_model_name)
+
+        self.model_menu.configure(values=names)
+        self.model_var.set(self._selected_model_name)
+        self._update_model_menu_state()
 
     def _update_model_menu_state(self) -> None:
         """Model choice only applies to the openai-whisper path (not PhoWhisper)."""
         busy = self._state != AppState.IDLE
-        if busy:
+        if busy or self._no_models_downloaded:
+            # Nothing downloaded yet means there is nothing to choose between;
+            # Manage Models… is the way out.
             self.model_menu.configure(state="disabled")
         else:
             is_pure_vi = self.language_var.get() == "vi"
@@ -444,10 +460,13 @@ class MeetingTranscriberApp(ctk.CTk):
                     ctk.CTkLabel(
                         rows_frame, text="✓ Selected", text_color="#2ecc71"
                     ).grid(row=idx, column=2, sticky="e", padx=(0, 8), pady=4)
-                else:
+                elif downloaded:
                     # Switching the active model while a transcription is
                     # running would race with the worker thread reading
-                    # it, so only allow it when idle.
+                    # it, so only allow it when idle. Not-downloaded models
+                    # have no Use button at all: the Model dropdown lists
+                    # downloaded checkpoints only, so they must be
+                    # downloaded here first.
                     ctk.CTkButton(
                         rows_frame,
                         text="Use",

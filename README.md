@@ -1,110 +1,144 @@
 # Meeting Transcriber
 
-Simple macOS and cross-platform desktop application that produces high-accuracy Vietnamese-first speech-to-text transcripts from imported audio files. Runs fully local and offline using `openai-whisper` and VinAI's `PhoWhisper-large` via `WhisperX`.
-
-## Features
-
-- **File Import & Drag-and-Drop:** Transcribe pre-recorded audio files (`.mp3`, `.wav`, `.m4a`, etc.) — via the **Import Files…** button or by dropping files onto the transcript area.
-- **Accurate Transcription:** High-accuracy transcript with timestamps (`PhoWhisper-large` + `WhisperX` for `vi`, or a selectable `openai-whisper` model for `vi+en`/`en`/`auto`).
-- **Language Options:** Mixed Vietnamese & English (`vi+en`, default), pure Vietnamese (`vi`), English (`en`), or Auto-detection.
-- **Selectable Model:** For `vi+en` / `en` / `auto`, pick which `openai-whisper` checkpoint runs the transcription (speed vs. accuracy trade-off); downloads on first use with a progress bar.
-- **Model Manager:** View every model cached locally, download one ahead of time, or delete ones you don't need.
-- **Privacy First:** 100% local processing; transcripts are saved next to each imported audio file as `<name>.transcript.txt`.
-
-## Prerequisites
-
-- **Python:** Version 3.10 is recommended (compatible with `faster-whisper` and `ctranslate2` wheels).
-- **macOS:** [Homebrew](https://brew.sh) installed (used to install system libraries automatically).
-- **Linux (Ubuntu/Debian):** `sudo` access (used to install system libraries automatically).
-
-## Quick Start (New Machine)
-
-1. **Clone the repository:**
-   ```bash
-   git clone <repository-url>
-   cd ai-meeting
-   ```
-
-2. **Run one-command setup** (installs `ffmpeg`, Tk, creates a virtualenv, and installs Python dependencies):
-   ```bash
-   make setup
-   # OR directly:
-   ./setup.sh
-   ```
-
-3. **Run the desktop app:**
-   ```bash
-   make run-local
-   # OR manually:
-   source .venv/bin/activate
-   python app.py
-   ```
-
-No manual research into system libraries is needed — `setup.sh` detects your OS (macOS/Linux) and installs everything required.
-
-Whichever model you select (`small` through `large-v3`/`large-v3-turbo`, or `PhoWhisper-large` for `vi`) downloads and caches automatically the first time you use it (~0.5–1.5 GB depending on size), with progress shown in the app. Internet is required only for that first download per model; transcription runs completely offline afterward.
-
-## Docker Usage
-
-For headless transcription without local environment setup:
+Desktop app that turns recorded meeting audio into timestamped, Vietnamese-first transcripts. Everything runs locally — no audio ever leaves your machine.
 
 ```bash
-# Build Docker image
-make build
+make setup      # once, on a new machine
+make run-local  # start the app
+```
 
-# Transcribe a file headlessly via Docker
+---
+
+## Using the app
+
+### 1. Pick a language mode
+
+The **Language** dropdown decides which engine transcribes your audio:
+
+| Choose | When your recording is | Engine used |
+| --- | --- | --- |
+| `vi+en` *(default)* | Vietnamese with English words mixed in ("deploy cái service này…") | openai-whisper, decoded as Vietnamese so English terms stay in English |
+| `vi` | Pure Vietnamese, no code-switching | PhoWhisper-large + WhisperX (most accurate for Vietnamese) |
+| `en` | English only | openai-whisper, forced to English |
+| `auto` | You're not sure / mixed sources | openai-whisper, language auto-detected |
+
+Most meeting recordings in a Vietnamese team should stay on **`vi+en`**. Switch to **`vi`** only when there is genuinely no English — PhoWhisper tends to Vietnamize English words.
+
+### 2. Pick a model (optional)
+
+The **Model** dropdown applies to `vi+en`, `en`, and `auto` (it's disabled for `vi`, which always uses PhoWhisper-large).
+
+```
+small  <  medium  <  large-v2  <  large-v3 (default)  <  large-v3-turbo
+```
+
+- Smaller = faster, less accurate. Larger = slower, more accurate.
+- `large-v3-turbo` is the good middle ground: near `large-v3` accuracy, noticeably faster.
+- **The dropdown lists only models you've already downloaded**, so picking one never stalls on a multi-GB download. To use a different model, download it from **Manage Models…** first (~0.5–1.5 GB each) — it appears in the dropdown as soon as the download finishes.
+- If you delete the model that's currently selected, the app switches the selection to another downloaded one.
+- On a fresh machine with nothing downloaded, the dropdown is disabled and reads `No models downloaded` — open **Manage Models…** to fetch one. (Starting a transcription anyway still works: it downloads the default `large-v3` on demand.)
+
+Changing the model mid-session is fine — the next transcription picks it up.
+
+### 3. Import audio
+
+Two ways, both accept **multiple files at once**:
+
+- Click **Import Files…** and select one or more files.
+- Drag files straight onto the transcript area.
+
+Supported: `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg`, `.opus`, `.wma`, `.mp4`
+
+Files are processed one after another. The status bar shows `Transcribing 2/5: standup.m4a…`, and each finished transcript is appended to the window under a header:
+
+```
+===== standup.m4a =====
+[00:00:04] Chào mọi người, hôm nay mình review sprint backlog.
+[00:00:11] Ticket đầu tiên đang bị block ở phần authentication.
+```
+
+The app is busy until the whole batch finishes — importing more files or switching the active model is blocked until then.
+
+### 4. Collect the transcripts
+
+Each transcript is saved as a `.txt` file **next to the original audio file**:
+
+```
+~/recordings/standup.m4a
+~/recordings/standup.transcript.txt   ← written for you
+```
+
+The bar under the transcript lists every file that was saved. Nothing is uploaded, and nothing is written anywhere else.
+
+---
+
+## Managing downloaded models
+
+Click **Manage Models…** to see disk usage and control downloads. It stays usable while a transcription is running.
+
+- Every model is listed with its size on disk, or `not downloaded` — this dialog is where you get at models the header dropdown doesn't show yet.
+- **Download** — fetch a model ahead of time (e.g. before a flight) instead of waiting mid-meeting. While downloading, the button becomes **Cancel**; cancelling deletes the partial file.
+- **Use** — make a downloaded model the active one (mirrors the header dropdown). Only shown for models on disk, and disabled during a transcription.
+- **Delete** — frees the disk space for that model only. It re-downloads automatically next time you use it.
+- Models downloaded previously via the whisper CLI show up here too.
+- PhoWhisper-large (the `vi` engine) isn't listed — it's managed separately and installs automatically the first time you transcribe in `vi` mode.
+
+---
+
+## Tips & troubleshooting
+
+- **First run of any model is slow.** It's downloading. Subsequent runs are fully offline.
+- **Transcription seems stuck.** Long recordings simply take a while — a 1-hour file on `large-v3` can take several minutes on Apple Silicon, longer on CPU-only machines. Drop to `medium` or `large-v3-turbo` if you need speed.
+- **English words come out as Vietnamese phonetics.** You're in `vi` mode — switch to `vi+en`.
+- **Drag-and-drop doesn't work.** It's optional (needs `tkinterdnd2`); the **Import Files…** button always works.
+- **A file failed.** The batch continues, and that file shows `[error: …]` in the transcript pane instead of stopping everything.
+- **`PhoWhisper failed …; falling back to …`** in the status bar means the `vi` engine couldn't load, so the selected openai-whisper model handled the file instead — the transcript is still produced.
+
+---
+
+## Headless / batch use without the GUI
+
+Transcribe from the command line (PhoWhisper + WhisperX):
+
+```bash
+python transcriber.py "The Qafé.m4a"        # defaults to vi
+python transcriber.py meeting.wav vi        # explicit language
+```
+
+Or via Docker, with no local Python setup:
+
+```bash
+make build
 make run-docker-cli FILE=viet-voice.mp3
 ```
 
-## Language & Model Selection
+---
 
-The app header has two dropdowns that together decide which model transcribes imported audio files.
+## Setup
 
-| Language dropdown | Transcription engine | Model dropdown |
-| --- | --- | --- |
-| `vi` (pure Vietnamese) | `PhoWhisper-large` via `WhisperX` (`WhisperXTranscriber` in `transcriber.py`) | Disabled — not applicable |
-| `vi+en` (mixed Vietnamese/English) | `openai-whisper`, decoded with `language="vi"` so code-switched English words are kept rather than Vietnamized | Enabled |
-| `en` | `openai-whisper`, decoded with `language="en"` | Enabled |
-| `auto` | `openai-whisper`, language auto-detected | Enabled |
+**Requirements:** Python 3.10 recommended. macOS needs [Homebrew](https://brew.sh); Linux (Ubuntu/Debian) needs `sudo` — both only so the setup script can install `ffmpeg` and Tk for you.
 
-When the Model dropdown is enabled, it selects which `openai-whisper` checkpoint (`FINAL_MODEL_OPTIONS` in `transcriber.py`) is used for those three modes:
-
-```
-small < medium < large-v2 < large-v3 (default) < large-v3-turbo
+```bash
+git clone <repository-url>
+cd ai-meeting
+make setup      # installs system libs, creates .venv, installs Python deps
+make run-local  # or: source .venv/bin/activate && python app.py
 ```
 
-Smaller models transcribe faster with lower accuracy; larger models are slower but more accurate. `large-v3-turbo` targets large-v3-level accuracy with faster inference.
+`setup.sh` detects your OS and installs everything needed — no manual dependency hunting. Internet is required only for `make setup` and the first download of each model.
 
-The Model dropdown marks already-downloaded checkpoints with a **✓** (e.g. `large-v3 ✓`). To download a model ahead of time, or to see/remove models you no longer need, use **Manage Models…** — see below.
+## For developers
 
-**Behavior notes (for humans and agents modifying this code):**
-- Switching the Model dropdown calls `Transcriber.set_final_model()`, which drops any already-loaded model so the next transcription loads the newly selected one.
-- The selected model downloads automatically on first use (cached under `~/.cache/whisper`, or `$XDG_CACHE_HOME/whisper` if set) with progress shown in the app's status bar and progress bar — no separate download step is required.
-- Routing logic lives in `MeetingTranscriberApp._apply_language_selection()` and `_run_final_transcription()` in `app.py`; the ✓ labels are rebuilt by `_refresh_model_menu_labels()`.
+| File | Responsibility |
+| --- | --- |
+| `app.py` | CustomTkinter UI, batch import, model manager dialog, worker threads |
+| `transcriber.py` | openai-whisper + WhisperX transcribers, model cache helpers, CLI entrypoint |
+| `phowhisper.py` | PhoWhisper-large download and CTranslate2 conversion |
 
-### Managing Local Models (Download / Disk Space)
+Notes for anyone modifying this:
 
-Click **Manage Models…** next to the Model dropdown to see every `openai-whisper` model cached on this machine, proactively download one, or free up disk space. It stays usable even while a transcription/download is already running in the background.
-
-- Lists all `FINAL_MODEL_OPTIONS` plus any other openai-whisper checkpoint found in the cache (e.g. downloaded previously via CLI), each with its size on disk or `not downloaded`.
-- **Use** makes a model the active selection (mirrored in the header's Model dropdown) — disabled while a transcription is running, to avoid racing with the worker thread reading the active model. **✓ Selected** marks the current one.
-- **Download** fetches a not-yet-downloaded model in the background (progress shown in the dialog) without needing to transcribe anything first. While it's running, the button becomes **Cancel** — clicking it stops the download and deletes the partial file, leaving the model as `not downloaded`.
-- **Delete** removes only the local cache file for that model — it re-downloads automatically the next time it's selected and used. Deleting does not affect any other installed model.
-- PhoWhisper-large (used automatically for the `vi` language mode) isn't listed here — it's managed separately by `phowhisper.py` and isn't part of the Model dropdown's selectable set.
-- Implemented by `MeetingTranscriberApp._open_model_manager()` in `app.py`, backed by `is_model_downloaded()` / `model_size_on_disk()` / `delete_model()` / `list_downloaded_whisper_models()` / `ensure_model_downloaded()` (which accepts a `cancel_event` and raises `DownloadCancelled`) in `transcriber.py`.
-
-## Project Structure & Output
-
-Transcribing an imported file saves the transcript next to it:
-
-```
-my-meeting.mp3
-my-meeting.transcript.txt
-```
-
-Example transcript format:
-
-```
-[00:01:23] Xin chào mọi người, hôm nay chúng ta review sprint backlog.
-```
-
+- Engine routing lives in `MeetingTranscriberApp._apply_language_selection()` and `_run_final_transcription()` in `app.py`.
+- Changing the model calls `Transcriber.set_final_model()`, which unloads the current model so the next run loads the new one.
+- `_refresh_model_menu_labels()` rebuilds the header dropdown from the models actually on disk, reassigns `_selected_model_name` if the selected one was deleted, and disables the menu with `NO_MODELS_LABEL` when the cache is empty.
+- Model cache lives in `~/.cache/whisper` (or `$XDG_CACHE_HOME/whisper`); helpers are `is_model_downloaded()`, `model_size_on_disk()`, `delete_model()`, `list_downloaded_whisper_models()`, and `ensure_model_downloaded()` (accepts a `cancel_event`, raises `DownloadCancelled`).
+- Transcription runs on a worker thread and reports back through `self._ui_queue`, polled by `_poll_ui_queue()`.
