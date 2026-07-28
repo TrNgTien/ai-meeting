@@ -197,6 +197,7 @@ class MeetingTranscriberApp(ctk.CTk):
         self._live_job: Optional[str] = None
         self._live_base = ""          # status text as of the last real report
         self._live_started: Optional[float] = None  # monotonic, chunk in flight
+        self._live_run_started: Optional[float] = None  # monotonic, whole run
         self._live_done_sec = 0.0     # audio seconds already transcribed
         self._live_total_sec: Optional[float] = None
         self._live_audio_sec = 0.0    # audio transcribed by this run, for rate
@@ -1197,6 +1198,11 @@ class MeetingTranscriberApp(ctk.CTk):
         self._live_base = base
         self._live_detail = detail
         self._live_started = time.monotonic()
+        # The chunk clock restarts every report; the run clock does not, so the
+        # "working" figure stays a total for the import instead of resetting to
+        # zero every time a chunk lands.
+        if self._live_run_started is None:
+            self._live_run_started = self._live_started
         if self._live_job is None:
             self._tick_live()
 
@@ -1215,6 +1221,7 @@ class MeetingTranscriberApp(ctk.CTk):
         self._live_total_sec = None
         self._live_audio_sec = 0.0
         self._live_wall_sec = 0.0
+        self._live_run_started = None
         self._live_frame = 0
 
     def _tick_live(self) -> None:
@@ -1228,7 +1235,9 @@ class MeetingTranscriberApp(ctk.CTk):
             self._live_job = None
             return
 
-        elapsed = time.monotonic() - self._live_started
+        now = time.monotonic()
+        elapsed = now - self._live_started  # this chunk only: drives ETA and bar
+        run_elapsed = now - (self._live_run_started or self._live_started)
         # A growing/shrinking ellipsis reads as motion in any font, unlike the
         # spinner glyphs, which rendered as garbage in the app's UI font.
         # Padded to a fixed width so the text after it doesn't jitter sideways.
@@ -1238,7 +1247,7 @@ class MeetingTranscriberApp(ctk.CTk):
         parts = []
         if self._live_detail:
             parts.append(self._live_detail)
-        parts.append(f"working {_format_duration(elapsed)}{dots}")
+        parts.append(f"working {_format_duration(run_elapsed)}{dots}")
 
         # Audio seconds transcribed per wall second, measured on this run.
         rate = self._live_audio_sec / self._live_wall_sec if self._live_wall_sec > 0 else 0.0
