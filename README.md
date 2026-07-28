@@ -2,10 +2,49 @@
 
 Desktop app that turns recorded meeting audio into timestamped, Vietnamese-first transcripts. Everything runs locally — no audio ever leaves your machine.
 
+## Quick start (macOS)
+
+Open **Terminal** (`Cmd + Space`, type `Terminal`). First, install Apple's command line tools — if a dialog appears, click **Install** and wait for it to finish before continuing:
+
 ```bash
-make setup      # once, on a new machine
-make run-local  # start the app
+xcode-select --install
 ```
+
+Then paste this whole block at once:
+
+```bash
+command -v brew >/dev/null || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || true)"
+git clone https://github.com/TrNgTien/ai-meeting.git && cd ai-meeting && make
+```
+
+That's the whole setup — `make` installs everything else (ffmpeg, Python, all packages) and opens the app. **The first run takes several minutes** downloading packages, so let it run even if it looks stuck. Afterwards, `cd ai-meeting && make` opens it in seconds.
+
+<details>
+<summary>Not on a Mac?</summary>
+
+**Ubuntu / Debian** — asks for your password once, when it installs `ffmpeg` and Tk:
+
+```bash
+sudo apt-get update && sudo apt-get install -y git make
+git clone https://github.com/TrNgTien/ai-meeting.git && cd ai-meeting && make
+```
+
+**Windows** — not supported directly. Install [WSL2](https://learn.microsoft.com/windows/wsl/install) (`wsl --install` in PowerShell as Administrator, then reboot), open the Ubuntu terminal it gives you, and run the commands above.
+
+</details>
+
+Then, in the window:
+
+1. **Import Files…** (or drag audio onto the transcript area) — `.mp3`, `.wav`, `.m4a`, `.mp4`, and more.
+2. Watch the transcript appear line by line. Nothing else to configure — the defaults (`vi+en`, `large-v3`) suit a Vietnamese team meeting with English terms mixed in.
+3. The finished `.txt` is saved next to your audio file, named `YYYYMMDD-HHMMSS-<recording>.txt`.
+
+Long recordings are transcribed in ~5-minute chunks, saved as they go, and **resume where they left off** if you stop or quit.
+
+**Internet:** needed for that first `make`, and once more the first time you transcribe (the speech model, ~1.5 GB, is downloaded and cached). Everything after that works offline.
+
+Only if you like: `make` accepts other targets — `make transcribe FILE=meeting.m4a` for headless CLI use, `make setup` to reinstall dependencies. Read on for what the dropdowns do.
 
 ---
 
@@ -34,11 +73,19 @@ small  <  medium  <  large-v2  <  large-v3 (default)  <  large-v3-turbo
 
 - Smaller = faster, less accurate. Larger = slower, more accurate.
 - `large-v3-turbo` is the good middle ground: near `large-v3` accuracy, noticeably faster.
-- **The dropdown lists only models you've already downloaded**, so picking one never stalls on a multi-GB download. To use a different model, download it from **Manage Models…** first (~0.5–1.5 GB each) — it appears in the dropdown as soon as the download finishes.
+- **On the CPU engine the dropdown lists only models you've already downloaded**, so picking one never stalls on a multi-GB download. To use a different model, download it from **Manage Models…** first (~0.5–1.5 GB each) — it appears in the dropdown as soon as the download finishes.
 - If you delete the model that's currently selected, the app switches the selection to another downloaded one.
 - On a fresh machine with nothing downloaded, the dropdown is disabled and reads `No models downloaded` — open **Manage Models…** to fetch one. (Starting a transcription anyway still works: it downloads the default `large-v3` on demand.)
 
 Changing the model mid-session is fine — the next transcription picks it up.
+
+### 2b. GPU (MLX) — Apple silicon only
+
+On an M-series Mac the header shows a **GPU (MLX)** switch, **on by default**. Leave it on: it decodes the same Whisper models on the Apple GPU instead of the CPU, which is the difference between a 44-minute recording taking an afternoon and taking a lunch break. The switch simply doesn't appear on Intel Macs, Linux, or Windows — nothing to configure there.
+
+- It applies to `vi+en`, `en`, and `auto` (the `vi` engine has its own path).
+- The two engines use different checkpoints (MLX conversions vs openai-whisper `.pt`), so the dropdown changes with the switch. MLX offers every size and fetches the one you pick on first use — the hint under the dropdown says when a download is pending. **Manage Models…** manages the CPU engine's `.pt` files only.
+- Because the engine is part of a checkpoint's fingerprint, flipping the switch mid-file restarts that file rather than resuming into output from the other engine.
 
 ### 3. Import audio
 
@@ -116,8 +163,18 @@ Click **Manage Models…** to see disk usage and control downloads. It stays usa
 
 ## Tips & troubleshooting
 
+**Getting it installed (macOS)**
+
+- **`brew: command not found`, right after installing Homebrew.** It isn't on your PATH yet. Run `eval "$(/opt/homebrew/bin/brew shellenv)"`, or just quit Terminal and open it again.
+- **`make: command not found`.** Step 1 didn't complete. Run `xcode-select --install` and let the dialog finish.
+- **The first `make` sits there for minutes with no output.** That's normal — it's downloading a few GB of Python packages. Leave it alone.
+- **`Repository not found` on `git clone`.** Ask the repo owner for access; the clone URL is correct but the repo may be private.
+
+**Using it**
+
 - **First run of any model is slow.** It's downloading. Subsequent runs are fully offline.
-- **Transcription seems stuck.** Watch the transcript pane — dimmed lines land every ~30 seconds of audio. The `mm:ss / mm:ss transcribed` counter behind them advances once per ~5-minute chunk. Everything runs on CPU (`DEVICE = "cpu"`), so `large-v3` with beam search is the slowest option by a wide margin; `large-v3-turbo`, or `vi` mode (PhoWhisper is int8 + VAD + batched), are much faster on long recordings.
+- **Transcription seems stuck.** Watch the transcript pane — dimmed lines land every ~30 seconds of audio. The `mm:ss / mm:ss transcribed` counter behind them advances once per ~5-minute chunk. Without the GPU (MLX) switch everything runs on CPU (`DEVICE = "cpu"`), where `large-v3` with beam search is the slowest option by a wide margin; turn **GPU (MLX)** on if you're on Apple silicon, or pick `large-v3-turbo`, or use `vi` mode (PhoWhisper is int8 + VAD + batched).
+- **`MLX unavailable …; using the CPU engine…`** in the status bar means the GPU path couldn't load, so the CPU engine took the file. The transcript is still produced, just slower.
 - **English words come out as Vietnamese phonetics.** You're in `vi` mode — switch to `vi+en`.
 - **Drag-and-drop doesn't work.** It's optional (needs `tkinterdnd2`); the **Import Files…** button always works.
 - **A file failed.** The batch continues, and that file shows `[error: …]` in the transcript pane instead of stopping everything. Its checkpoint is kept, so re-importing retries from where it got to.
@@ -128,11 +185,11 @@ Click **Manage Models…** to see disk usage and control downloads. It stays usa
 
 ## Headless / batch use without the GUI
 
-Transcribe from the command line (PhoWhisper + WhisperX):
+Transcribe from the command line (PhoWhisper + WhisperX). Same one-command story — `make transcribe` sets up whatever is missing first:
 
 ```bash
-python transcriber.py "The Qafé.m4a"        # defaults to vi
-python transcriber.py meeting.wav vi        # explicit language
+make transcribe FILE="The Qafé.m4a"             # defaults to vi
+make transcribe FILE=meeting.wav LANG_MODE=vi   # explicit language
 ```
 
 Or via Docker, with no local Python setup:
@@ -144,18 +201,23 @@ make run-docker-cli FILE=viet-voice.mp3
 
 ---
 
-## Setup
+## Setup, in detail
 
-**Requirements:** Python 3.10 recommended. macOS needs [Homebrew](https://brew.sh); Linux (Ubuntu/Debian) needs `sudo` — both only so the setup script can install `ffmpeg` and Tk for you.
+You don't need this section — `make` does all of it. It's here so you know what the machine is being asked to do.
 
-```bash
-git clone <repository-url>
-cd ai-meeting
-make setup      # installs system libs, creates .venv, installs Python deps
-make run-local  # or: source .venv/bin/activate && python app.py
-```
+**Requirements:** macOS (with [Homebrew](https://brew.sh)) or Ubuntu/Debian (with `sudo`), so the setup script can install `ffmpeg` and Tk for you. Python 3.10, 3.11, or 3.12 — on macOS one is installed for you if you have none.
 
-`setup.sh` detects your OS and installs everything needed — no manual dependency hunting. Internet is required only for `make setup` and the first download of each model.
+| Command | What it does |
+| --- | --- |
+| `make` | Sets up if needed, then launches the app. **This is the one command.** |
+| `make setup` | Forces a full setup pass without launching. |
+| `make run-local` | Launches the app (setting up first if it has never been set up). |
+| `make transcribe FILE=… [LANG_MODE=…]` | Headless CLI transcription. |
+| `make build` / `make run-docker-cli FILE=…` | Docker image and containerised CLI. |
+
+`setup.sh` is idempotent — it only installs what's actually missing, so re-running it is cheap. `make` re-runs it automatically whenever `requirements.txt` or `setup.sh` changes, so pulling new dependencies never means remembering a second command. Internet is required for that first setup and for the first download of each model.
+
+If your Python lives somewhere unusual: `PYTHON_BIN=/path/to/python3.10 make setup`.
 
 ## For developers
 
