@@ -36,6 +36,105 @@ DEVICE = "cpu"
 # openai-whisper only supports fp16 on CUDA; keep it off for CPU inference.
 USE_FP16 = False
 
+# --- hallucination control ----------------------------------------------------
+
+# Whisper was trained on YouTube captions, so over silence or background noise
+# it does not stay quiet — it emits the most likely thing to follow, which for
+# Vietnamese audio is a channel outro ("Hãy subscribe cho kênh Ghiền Mì Gõ…").
+# Worse, with the default condition_on_previous_text=True that invented line
+# becomes the prompt for the next window and the model repeats it once per 30 s
+# decode window for the rest of the recording.
+#
+# These options are shared by the openai-whisper and mlx-whisper engines, whose
+# transcribe() signatures match. Dropping the previous-text conditioning is the
+# fix for the repeat loop; the thresholds make the model bail out of a window
+# it is not confident about instead of guessing.
+DECODE_OPTIONS = {
+    "condition_on_previous_text": False,
+    # Below this average token logprob the window is treated as a failed decode.
+    "logprob_threshold": -1.0,
+    # A window whose gzip ratio exceeds this is degenerate repetition.
+    "compression_ratio_threshold": 2.4,
+    # Above this no-speech probability the window is emitted as silence.
+    "no_speech_threshold": 0.6,
+    # Needs word_timestamps: drops words whose timings sit inside a gap of
+    # silence this long, which is what an invented outro looks like.
+    "word_timestamps": True,
+    "hallucination_silence_threshold": 2.0,
+}
+
+# Stock phrases Whisper falls back on when there is nothing to transcribe.
+# Matched case-insensitively against the whole segment, after stripping
+# punctuation, so a segment is only dropped when it is *entirely* boilerplate —
+# the same words spoken inside a real sentence survive.
+_HALLUCINATION_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        # Vietnamese YouTube outros
+        r"^h[ãa]y subscribe cho k[êe]nh\b.*",
+        r".*\bghi[eề]n m[ìi] g[õo]\b.*",
+        r"^đăng k[ýy] k[êe]nh\b.*",
+        r"^c[ảa]m [ơo]n c[áa]c b[ạa]n đ[ãa] (theo d[õo]i|xem|l[ắa]ng nghe)\b.*",
+        r"^h[ẹe]n g[ặa]p l[ạa]i c[áa]c b[ạa]n\b.*",
+        r"^c[áa]c b[ạa]n c[óo] th[ểe] nh[ậa]n th[êe]m nhi[ềe]u th[ôo]ng tin\b.*",
+        r".*trong ph[ầa]n b[ìi]nh lu[ậa]n\s*$",
+        r"^ch[úu]c c[áa]c b[ạa]n (xem )?(video )?vui v[ẻe]\b.*",
+        # English equivalents, which show up on mixed-language audio
+        r"^thanks? (you )?for watching\b.*",
+        r"^(please )?(don't forget to )?subscribe\b.*",
+        r"^(subtitles?|amara)\b.*",
+    )
+]
+
+# Punctuation and whitespace to ignore when matching the patterns above.
+_PUNCT = re.compile(r"[.,!?…\-–—\"'()\[\]]+")
+
+
+def is_hallucination(text: str) -> bool:
+    """True if a segment is one of Whisper's canned silence fillers."""
+    normalized = _PUNCT.sub(" ", text)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return True
+    return any(pattern.fullmatch(normalized) for pattern in _HALLUCINATION_PATTERNS)
+
+
+def drop_hallucinations(
+    segments: list["TranscriptSegment"],
+) -> list["TranscriptSegment"]:
+    """Strip canned filler and collapse the repeat loops it causes.
+
+    Beyond the known phrases, a *sentence* repeated back-to-back is dropped: a
+    speaker does not say the same eight words verbatim three windows running,
+    but a model that has locked onto its own output does. Short utterances are
+    left alone — "ừ", "vâng", "okay" really are said twice in a row, and a run
+    of them is speech rather than a loop.
+    """
+    kept: list[TranscriptSegment] = []
+    for segment in segments:
+        if is_hallucination(segment.text):
+            continue
+        text = segment.text.strip()
+        if kept and kept[-1].text.strip() == text and _is_sentence(text):
+            # Only stretch the surviving copy over a repeat that butts up
+            # against it; a duplicate a minute later is silence in between,
+            # and claiming the speaker held that line the whole time is worse
+            # than leaving the gap.
+            if segment.start_sec - kept[-1].end_sec <= 1.0:
+                kept[-1].end_sec = max(kept[-1].end_sec, segment.end_sec)
+            continue
+        kept.append(segment)
+    return kept
+
+
+# Word count above which a verbatim back-to-back repeat is a decode loop
+# rather than something a person said twice.
+_REPEAT_MIN_WORDS = 4
+
+
+def _is_sentence(text: str) -> bool:
+    return len(text.split()) >= _REPEAT_MIN_WORDS
+
 # progress_cb(model_name, downloaded_bytes, total_bytes). total_bytes may be 0
 # when the server does not report a Content-Length.
 ProgressCallback = Callable[[str, int, int], None]
@@ -218,6 +317,7 @@ class _SegmentPrintTap(io.TextIOBase):
         self._offset = offset_sec
         self._passthrough = passthrough
         self._buffer = ""
+        self._last_text = ""
 
     def write(self, data: str) -> int:
         self._buffer += data
@@ -249,6 +349,11 @@ class _SegmentPrintTap(io.TextIOBase):
         text = match.group(3).strip()
         if not text:
             return
+        # The live preview goes straight to the UI without passing through
+        # _collect_segments, so it needs the same filtering applied here.
+        if is_hallucination(text) or (text == self._last_text and _is_sentence(text)):
+            return
+        self._last_text = text
         try:
             start = _parse_clock(match.group(1))
             end = _parse_clock(match.group(2))
@@ -340,6 +445,7 @@ class Transcriber:
             task="transcribe",
             fp16=USE_FP16,
             beam_size=5,
+            **DECODE_OPTIONS,
         )
         return self._collect_segments(result, offset_sec=0.0)
 
@@ -366,6 +472,7 @@ class Transcriber:
                 fp16=USE_FP16,
                 beam_size=5,
                 verbose=True if streaming else None,
+                **DECODE_OPTIONS,
             )
         return self._collect_segments(result, offset_sec=offset_sec)
 
@@ -391,7 +498,7 @@ class Transcriber:
                     text=text,
                 )
             )
-        return collected
+        return drop_hallucinations(collected)
 
 
 def segments_to_text(segments: list[TranscriptSegment]) -> str:
@@ -524,7 +631,7 @@ class WhisperXTranscriber:
                     text=text,
                 )
             )
-        return collected
+        return drop_hallucinations(collected)
 
     def transcribe_file_to_text(self, wav_path: Path) -> str:
         return segments_to_text(self.transcribe_file(wav_path))

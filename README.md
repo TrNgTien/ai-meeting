@@ -71,8 +71,10 @@ Each transcript is saved as a `.txt` file **next to the original audio file**:
 
 ```
 ~/recordings/standup.m4a
-~/recordings/standup.transcript.txt   ← written for you
+~/recordings/20260728-142530-standup.txt   ← written for you
 ```
+
+The name is `<when>-<recording>.txt`, where `when` is the local time the transcription started (`YYYYMMDD-HHMMSS`) — so a folder of transcripts sorts oldest-first, and transcribing the same recording again (after switching model or language, say) leaves the earlier transcript alone instead of overwriting it.
 
 The bar under the transcript lists every file that was saved. Nothing is uploaded, and nothing is written anywhere else.
 
@@ -83,9 +85,9 @@ The bar under the transcript lists every file that was saved. Nothing is uploade
 Meeting recordings are usually long, and on CPU a 1-hour file takes a while. So a file is never transcribed in one unstoppable pass:
 
 - **Chunked.** Audio is transcribed ~5 minutes at a time. Boundaries are snapped to the quietest moment nearby, so cuts land in a pause rather than mid-word.
-- **Streamed to disk.** Each finished chunk is appended to `<name>.transcript.txt` and flushed (`fsync`) immediately. You can open the transcript in another editor and read it while the run is still going — it's never held in memory only.
+- **Streamed to disk.** Each finished chunk is appended to `<timestamp>-<name>.txt` and flushed (`fsync`) immediately. You can open the transcript in another editor and read it while the run is still going — it's never held in memory only.
 - **Checkpointed.** A small `<name>.transcript.partial.json` next to the audio records how far into the recording the text goes.
-- **Resumable.** Import the same file again and it continues from the last written line (`resuming at 00:25:00…`). A crash, a power loss, or quitting costs at most the chunk in flight — everything before it is already in the `.txt`.
+- **Resumable.** Import the same file again and it continues from the last written line (`resuming at 00:25:00…`), appending to the transcript the interrupted run started rather than opening a new one. A crash, a power loss, or quitting costs at most the chunk in flight — everything before it is already in the `.txt`.
 - **Stoppable.** **Stop** ends the run after the current chunk. Files later in the batch aren't started. Nothing is lost.
 - **Self-healing.** If the app died halfway through writing a chunk, the leftover tail past the checkpoint is truncated on the next run and that chunk is redone — so you never get a duplicated or half-written line.
 

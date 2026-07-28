@@ -26,9 +26,9 @@ from chunking import (
     DEFAULT_CHUNK_SECONDS,
     TranscribeAudio,
     TranscriptionCancelled,
+    resolve_transcript_path,
     resumable_seconds,
     transcribe_chunked,
-    transcript_path_for,
 )
 from transcriber import (
     FINAL_MODEL,
@@ -885,7 +885,7 @@ class MeetingTranscriberApp(ctk.CTk):
                 self._ui_queue.put(("status", f"{label}…"))
                 self._ui_queue.put(("file_start", source.name))
                 try:
-                    self._run_final_transcription(source, label)
+                    written = self._run_final_transcription(source, label)
                 except TranscriptionCancelled:
                     # Chunks finished before this point are already written to
                     # the transcript file; the remaining files never started.
@@ -895,8 +895,9 @@ class MeetingTranscriberApp(ctk.CTk):
                     self._ui_queue.put(("chunk_text", f"[error: {exc}]"))
                     continue
                 # The transcript file is written chunk by chunk by
-                # transcribe_chunked(), so there is nothing to save here.
-                saved.append(str(transcript_path_for(source)))
+                # transcribe_chunked(), so there is nothing to save here — only
+                # the timestamped name it picked, which Reveal in Finder needs.
+                saved.append(str(written))
             self._ui_queue.put(
                 (
                     "batch_done",
@@ -972,15 +973,19 @@ class MeetingTranscriberApp(ctk.CTk):
         language = self._transcriber.language or "auto"
         return f"whisper-{model_name}:{language}", self._transcriber.transcribe_audio
 
-    def _run_final_transcription(self, wav_path: Path, label: str) -> str:
+    def _run_final_transcription(self, wav_path: Path, label: str) -> Path:
         """Transcribe one file in chunks, resuming from a checkpoint if present.
 
         Long meetings are the normal case here, so the file is processed a few
         minutes at a time and every finished chunk is persisted (see
         chunking.py). A crash, a quit, or Stop therefore costs at most the
         chunk in flight rather than the whole recording.
+
+        Returns the transcript file that was written: its name carries the time
+        the run started, which only chunking.py knows how to pick.
         """
         engine_key, transcribe_audio = self._prepare_engine()
+        out_path = resolve_transcript_path(wav_path, engine_key)
 
         resume_at = resumable_seconds(wav_path, engine_key)
         if resume_at > 0:
@@ -1004,11 +1009,11 @@ class MeetingTranscriberApp(ctk.CTk):
                 )
             )
 
-        return transcribe_chunked(
+        transcribe_chunked(
             wav_path,
             transcribe_audio=transcribe_audio,
             engine_key=engine_key,
-            output_path=transcript_path_for(wav_path),
+            output_path=out_path,
             on_progress=on_progress,
             on_text=lambda text: self._ui_queue.put(("chunk_text", text)),
             on_segment=lambda segment: self._ui_queue.put(
@@ -1016,6 +1021,7 @@ class MeetingTranscriberApp(ctk.CTk):
             ),
             cancel_event=self._cancel_event,
         )
+        return out_path
 
     def _poll_ui_queue(self) -> None:
         try:

@@ -26,7 +26,13 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from transcriber import SegmentCallback, TranscriptSegment, stream_segments
+from transcriber import (
+    DECODE_OPTIONS,
+    SegmentCallback,
+    TranscriptSegment,
+    drop_hallucinations,
+    stream_segments,
+)
 
 # openai-whisper checkpoint name -> converted MLX checkpoint on the Hub. Keyed
 # by the names in transcriber.FINAL_MODEL_OPTIONS so the Model dropdown means
@@ -264,6 +270,7 @@ class MLXTranscriber:
                 language=self.language,
                 task="transcribe",
                 verbose=True if streaming else None,
+                **DECODE_OPTIONS,
             )
         segments = []
         for raw in result.get("segments", []):
@@ -277,4 +284,4 @@ class MLXTranscriber:
                     text=text,
                 )
             )
-        return segments
+        return drop_hallucinations(segments)
