@@ -103,6 +103,9 @@ def main() -> None:
         except json.JSONDecodeError as exc:
             emit("error", message=f"bad JSON: {exc}")
             continue
+        if not isinstance(msg, dict):
+            emit("error", message=f"expected object, got {type(msg).__name__}")
+            continue
         sidecar.handle(msg)
 
 
