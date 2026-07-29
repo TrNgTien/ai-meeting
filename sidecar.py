@@ -91,6 +91,54 @@ class Sidecar:
         ]
         emit("models", models=models)
 
+    def cmd_download_model(self, msg: dict) -> None:
+        name = msg["name"]
+        if name in self._download_cancel_events:
+            return
+        cancel_event = threading.Event()
+        self._download_cancel_events[name] = cancel_event
+
+        def worker() -> None:
+            try:
+                ensure_model_downloaded(
+                    name,
+                    lambda m, d, t: emit("mm_progress", model=m, downloaded=d, total=t),
+                    cancel_event=cancel_event,
+                )
+                emit("mm_download_finished", name=name, status="done")
+            except DownloadCancelled:
+                emit("mm_download_finished", name=name, status="cancelled")
+            except Exception as exc:
+                emit("mm_download_finished", name=name, status="error", error=str(exc))
+            finally:
+                # app.py's equivalent cleanup lives in _handle_ui_event on the
+                # Tk main thread (a separate poll loop); sidecar.py has no such
+                # loop, so the worker that owns this entry cleans it up itself.
+                self._download_cancel_events.pop(name, None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cmd_delete_model(self, msg: dict) -> None:
+        name = msg["name"]
+        delete_model(name)
+        emit("model_deleted", name=name)
+
+    def cmd_cancel(self, msg: dict) -> None:
+        if "name" in msg:
+            name = msg["name"]
+            cancel_event = self._download_cancel_events.get(name)
+            if cancel_event is None:
+                emit("error", message=f"no download in progress for '{name}'")
+                return
+            cancel_event.set()
+            return
+
+        job_id = msg.get("id")
+        if job_id is None or job_id != self._current_job_id:
+            emit("error", message=f"no running job '{job_id}'")
+            return
+        self._cancel_event.set()
+
 
 def main() -> None:
     sidecar = Sidecar()
