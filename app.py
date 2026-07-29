@@ -21,7 +21,9 @@ from typing import Optional
 
 import customtkinter as ctk
 
+import audio_capture
 import mlx_engine
+import transcript_merge
 from chunking import (
     DEFAULT_CHUNK_SECONDS,
     TranscribeAudio,
@@ -66,9 +68,18 @@ LIVE_TICK_MS = 400
 
 REVEAL_LABEL = "Reveal in Finder" if sys.platform == "darwin" else "Show in Folder"
 
+# Where recorded meetings land. Relative to the app, next to the transcripts
+# they produce, so a meeting's audio and text stay together.
+RECORDINGS_DIR = Path(__file__).resolve().parent / "recordings"
+
+# Cadence of the recording timer and level meters. Fast enough that the meters
+# read as sound rather than as a progress bar.
+METER_TICK_MS = 100
+
 
 class AppState(Enum):
     IDLE = auto()
+    RECORDING = auto()
     TRANSCRIBING = auto()
 
 
@@ -208,6 +219,15 @@ class MeetingTranscriberApp(ctk.CTk):
         # Transcripts written by the last finished batch, for Reveal in Finder.
         self._saved_paths: list[Path] = []
 
+        # Live recording. The recorder itself owns both capture backends; the
+        # app only holds it while a take is in progress, plus the Tk job that
+        # repaints the timer and the level meters.
+        self._recorder: Optional[audio_capture.MeetingRecorder] = None
+        self._meter_job: Optional[str] = None
+        # Smoothed meter levels: raw per-tick peaks jump around too much to
+        # read, so the bars fall gradually and rise instantly.
+        self._meter_shown = {"mic": 0.0, "system": 0.0}
+
         # Set while the Manage Models dialog is open, so background downloads
         # started from the main transcription flow or from that dialog can
         # refresh its status text/list via the UI queue.
@@ -336,6 +356,8 @@ class MeetingTranscriberApp(ctk.CTk):
         )
         self.stop_button.grid(row=0, column=1, padx=(0, 16))
 
+        self._build_record_row(controls)
+
         # Two lines rather than one: what is happening stays put on top, while
         # the numbers that change every tick sit below in small gray text. One
         # combined line grew past the window and got clipped mid-word.
@@ -424,6 +446,124 @@ class MeetingTranscriberApp(ctk.CTk):
         )
         self.reveal_button.grid(row=0, column=1, padx=(12, 0))
         self.reveal_button.grid_remove()
+
+    def _build_record_row(self, parent: ctk.CTkFrame) -> None:
+        """Controls for recording a meeting live, rather than importing a file.
+
+        Both sides of the meeting get their own switch and their own meter: the
+        commonest recording failure is one side being silent (muted microphone,
+        or playback going somewhere the machine can't observe), and a meter that
+        never moves says so while there is still time to fix it.
+        """
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        row.grid_columnconfigure(5, weight=1)
+
+        self.record_button = ctk.CTkButton(
+            row,
+            text="● Record Meeting",
+            command=self._toggle_recording,
+            width=150,
+            fg_color="#a13a3a",
+            hover_color="#b84a4a",
+        )
+        self.record_button.grid(row=0, column=0, padx=(0, 12))
+
+        self.record_mic_var = tk.BooleanVar(value=True)
+        self.record_mic_check = ctk.CTkCheckBox(
+            row,
+            text="Me (mic)",
+            variable=self.record_mic_var,
+            command=self._refresh_record_hint,
+            width=90,
+        )
+        self.record_mic_check.grid(row=0, column=1, padx=(0, 6))
+
+        devices = audio_capture.list_input_devices()
+        self._mic_label_to_index = {d.label: d.index for d in devices}
+        default_device = audio_capture.default_input_device()
+        self.mic_device_var = tk.StringVar(
+            value=default_device.label if default_device else "No input devices"
+        )
+        self.mic_device_menu = ctk.CTkOptionMenu(
+            row,
+            values=[d.label for d in devices] or ["No input devices"],
+            variable=self.mic_device_var,
+            width=170,
+        )
+        self.mic_device_menu.grid(row=0, column=2, padx=(0, 16))
+
+        self.record_system_var = tk.BooleanVar(value=True)
+        self.record_system_check = ctk.CTkCheckBox(
+            row,
+            text="Meeting (system audio)",
+            variable=self.record_system_var,
+            command=self._refresh_record_hint,
+            width=180,
+        )
+        self.record_system_check.grid(row=0, column=3, padx=(0, 16))
+
+        meters = ctk.CTkFrame(row, fg_color="transparent")
+        meters.grid(row=0, column=4, sticky="w")
+        self.mic_meter = ctk.CTkProgressBar(meters, width=80, height=6)
+        self.mic_meter.set(0.0)
+        self.mic_meter.grid(row=0, column=0, pady=(0, 3))
+        self.system_meter = ctk.CTkProgressBar(meters, width=80, height=6)
+        self.system_meter.set(0.0)
+        self.system_meter.grid(row=1, column=0)
+
+        self.record_timer = ctk.CTkLabel(
+            row,
+            text="",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color="#d05050",
+        )
+        self.record_timer.grid(row=0, column=6, sticky="e")
+
+        self.record_hint = ctk.CTkLabel(
+            row,
+            text="",
+            text_color="gray",
+            font=ctk.CTkFont(size=11),
+            anchor="w",
+            justify="left",
+        )
+        self.record_hint.grid(row=1, column=0, columnspan=7, sticky="w", pady=(4, 0))
+        self._refresh_record_hint()
+
+    def _refresh_record_hint(self) -> None:
+        """Say up front how the meeting side will be captured, or why it can't be.
+
+        Checked before recording rather than after, because the alternative is
+        discovering at the end of an hour-long call that only one voice was
+        ever captured.
+        """
+        if not self.record_system_var.get():
+            self.record_hint.configure(
+                text="Recording your microphone only — the other participants won't be captured."
+            )
+            return
+
+        if audio_capture.ScreenCaptureKitCapture.available():
+            self.record_hint.configure(
+                text="Meeting audio: macOS system capture. Needs Screen Recording "
+                "permission for this app the first time (System Settings > Privacy "
+                "& Security > Screen & System Audio Recording)."
+            )
+            return
+
+        loopback = audio_capture.LoopbackDeviceCapture.find()
+        if loopback is not None:
+            self.record_hint.configure(
+                text=f"Meeting audio: via the '{loopback.name}' loopback device. "
+                "Make sure the meeting's playback is routed through it."
+            )
+            return
+
+        self.record_hint.configure(
+            text="Meeting audio is unavailable on this machine — install the "
+            "pyobjc packages (macOS 13+) or a loopback device such as BlackHole."
+        )
 
     def _build_skeleton(self, parent: ctk.CTkFrame) -> None:
         """Create a shimmer skeleton overlay that covers the transcript box."""
@@ -797,13 +937,31 @@ class MeetingTranscriberApp(ctk.CTk):
             self.import_button.configure(state="normal")
             self.language_menu.configure(state="normal")
             self.stop_button.configure(state="disabled", text="Stop")
+            self.record_button.configure(state="normal", text="● Record Meeting")
+            self._set_record_inputs_enabled(True)
             self._hide_skeleton()
+        elif state == AppState.RECORDING:
+            # Nothing else may run during a take: transcription would fight the
+            # recorder for the CPU, and a meeting can't be recorded twice.
+            self.import_button.configure(state="disabled")
+            self.language_menu.configure(state="disabled")
+            self.stop_button.configure(state="disabled", text="Stop")
+            self.record_button.configure(state="normal", text="■ Stop Recording")
+            self._set_record_inputs_enabled(False)
         elif state == AppState.TRANSCRIBING:
             self.import_button.configure(state="disabled")
             self.language_menu.configure(state="disabled")
             self.stop_button.configure(state="normal", text="Stop")
+            self.record_button.configure(state="disabled", text="● Record Meeting")
+            self._set_record_inputs_enabled(False)
             self._show_skeleton()
         self._update_model_menu_state()
+
+    def _set_record_inputs_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        self.record_mic_check.configure(state=state)
+        self.record_system_check.configure(state=state)
+        self.mic_device_menu.configure(state=state)
 
     def _request_stop(self) -> None:
         """Ask the worker to stop after the chunk it is currently transcribing.
@@ -816,6 +974,173 @@ class MeetingTranscriberApp(ctk.CTk):
         self._cancel_event.set()
         self.stop_button.configure(state="disabled", text="Stopping…")
         self._set_status("Stopping after the current chunk — progress is saved.")
+
+    # --- recording -----------------------------------------------------------
+
+    def _toggle_recording(self) -> None:
+        if self._state == AppState.RECORDING:
+            self._stop_recording()
+        elif self._state == AppState.IDLE:
+            self._start_recording()
+
+    def _start_recording(self) -> None:
+        if not (self.record_mic_var.get() or self.record_system_var.get()):
+            self._set_status("Pick at least one side to record — mic, meeting audio, or both.")
+            return
+
+        recorder = audio_capture.MeetingRecorder(
+            RECORDINGS_DIR,
+            record_mic=self.record_mic_var.get(),
+            record_system=self.record_system_var.get(),
+            mic_device=self._mic_label_to_index.get(self.mic_device_var.get()),
+        )
+        self._set_state(AppState.RECORDING)
+        self.record_button.configure(state="disabled", text="Starting…")
+        self._set_status("Starting recording…")
+
+        # Off the UI thread: asking macOS for permission to capture system audio
+        # can sit for seconds, and the first time it puts a dialog on screen.
+        def worker() -> None:
+            try:
+                recorder.start()
+            except Exception as exc:
+                self._ui_queue.put(("rec_failed", str(exc)))
+                return
+            self._ui_queue.put(("rec_started", recorder))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _stop_recording(self) -> None:
+        recorder = self._recorder
+        if recorder is None:
+            return
+        self.record_button.configure(state="disabled", text="Stopping…")
+        self._set_status("Finishing the recording…")
+
+        def worker() -> None:
+            try:
+                recording = recorder.stop()
+            except Exception as exc:
+                self._ui_queue.put(("rec_failed", str(exc)))
+                return
+            self._ui_queue.put(("rec_stopped", recording))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _tick_meters(self) -> None:
+        recorder = self._recorder
+        if recorder is None or not recorder.running:
+            return
+        levels = recorder.levels()
+        for key, level, meter in (
+            ("mic", levels.mic, self.mic_meter),
+            ("system", levels.system, self.system_meter),
+        ):
+            # Jump straight to a new peak but decay slowly, the way a hardware
+            # meter behaves — raw per-tick peaks flicker too much to read.
+            shown = max(level, self._meter_shown[key] * 0.72)
+            self._meter_shown[key] = shown
+            # Speech sits well below full scale, so the bar is scaled to make
+            # normal talking visible rather than a barely-moving sliver.
+            meter.set(min(1.0, shown * 3.0))
+        self.record_timer.configure(text=f"● {format_timestamp(recorder.elapsed())}")
+        self._meter_job = self.after(METER_TICK_MS, self._tick_meters)
+
+    def _stop_meters(self) -> None:
+        if self._meter_job is not None:
+            self.after_cancel(self._meter_job)
+            self._meter_job = None
+        self._meter_shown = {"mic": 0.0, "system": 0.0}
+        self.mic_meter.set(0.0)
+        self.system_meter.set(0.0)
+        self.record_timer.configure(text="")
+
+    def _transcribe_recording(self, recording: audio_capture.Recording) -> None:
+        """Transcribe each recorded side, then weave them into one conversation.
+
+        The tracks are transcribed separately rather than mixed, which is what
+        lets the merged transcript attribute each line — and keeps your own
+        voice, bleeding from the speakers into the microphone, from being
+        transcribed twice.
+        """
+        tracks: list[tuple[Path, str]] = []
+        if recording.mic_path is not None:
+            tracks.append((recording.mic_path, transcript_merge.MIC_LABEL))
+        if recording.system_path is not None:
+            tracks.append((recording.system_path, transcript_merge.SYSTEM_LABEL))
+
+        if not tracks:
+            problems = " ".join(recording.warnings)
+            self._set_status(f"Nothing was recorded. {problems}".strip())
+            self._set_state(AppState.IDLE)
+            return
+
+        self._apply_language_selection()
+        self._cancel_event = threading.Event()
+        self._reset_live()
+        self._set_state(AppState.TRANSCRIBING)
+        self.transcript_box.delete("1.0", "end")
+        self.saved_label.configure(text="")
+        self._saved_paths = []
+        self.reveal_button.grid_remove()
+
+        def worker() -> None:
+            saved: list[str] = []
+            transcripts: dict[str, Path] = {}
+            cancelled = False
+            batch_started = time.monotonic()
+
+            for index, (path, label) in enumerate(tracks, start=1):
+                counter = f" {index}/{len(tracks)}" if len(tracks) > 1 else ""
+                title = f"Transcribing{counter} the '{label}' track"
+                self._ui_queue.put(("status", f"{title}…"))
+                self._ui_queue.put(("file_start", f"{label} — {path.name}"))
+                try:
+                    written = self._run_final_transcription(path, title)
+                except TranscriptionCancelled:
+                    cancelled = True
+                    break
+                except Exception as exc:
+                    self._ui_queue.put(("chunk_text", f"[error: {exc}]"))
+                    continue
+                transcripts[label] = written
+                saved.append(str(written))
+
+            # A cancelled run has only part of one side on disk, so a merge
+            # would read as a conversation with half of it missing. The
+            # per-track transcripts are still there and still resumable.
+            if transcripts and not cancelled:
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(recording.started_at))
+                merged_path = RECORDINGS_DIR / f"{recording.stem}-conversation.txt"
+                try:
+                    transcript_merge.merge_transcript_files(
+                        mic_transcript=transcripts.get(transcript_merge.MIC_LABEL),
+                        system_transcript=transcripts.get(transcript_merge.SYSTEM_LABEL),
+                        output_path=merged_path,
+                        header=(
+                            f"# Meeting recorded {when} "
+                            f"({_format_duration(recording.duration_sec)})"
+                        ),
+                    )
+                except Exception as exc:
+                    self._ui_queue.put(("status", f"Could not merge the tracks: {exc}"))
+                else:
+                    saved.append(str(merged_path))
+                    self._ui_queue.put(("merged_text", merged_path))
+
+            self._ui_queue.put(
+                (
+                    "batch_done",
+                    {
+                        "count": len(saved),
+                        "saved": saved,
+                        "cancelled": cancelled,
+                        "elapsed_sec": time.monotonic() - batch_started,
+                    },
+                )
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _setup_dnd(self) -> None:
         """Enable dropping audio files onto the transcript area (best-effort)."""
@@ -1077,6 +1402,45 @@ class MeetingTranscriberApp(ctk.CTk):
             self._append_transcript(payload)
         elif event == "chunk_progress":
             self._update_chunk_progress(payload)
+        elif event == "rec_started":
+            self._recorder = payload
+            self._meter_shown = {"mic": 0.0, "system": 0.0}
+            self._tick_meters()
+            sides = []
+            if payload.system_description:
+                sides.append(payload.system_description)
+            # Warnings here mean one side couldn't be opened. The take goes
+            # ahead with what is left, but it has to be said now, not at the end.
+            for warning in payload.warnings:
+                self._append_transcript(f"[note] {warning}")
+            self._set_status(
+                "Recording — press Stop Recording when the meeting ends.",
+                detail="; ".join(sides) or None,
+            )
+        elif event == "rec_failed":
+            self._recorder = None
+            self._stop_meters()
+            self._set_status(f"Could not record: {payload}")
+            self._set_state(AppState.IDLE)
+        elif event == "rec_stopped":
+            self._recorder = None
+            self._stop_meters()
+            for warning in payload.warnings:
+                self._append_transcript(f"[note] {warning}")
+            self._set_status(
+                f"Recorded {_format_duration(payload.duration_sec)}. Transcribing…"
+            )
+            self._transcribe_recording(payload)
+        elif event == "merged_text":
+            # The conversation view replaces the two per-track passes shown so
+            # far: same words, but in the order they were actually spoken and
+            # attributed to a side, which is the thing worth reading.
+            self._drop_preview()
+            self.transcript_box.delete("1.0", "end")
+            try:
+                self._append_transcript(Path(payload).read_text(encoding="utf-8"))
+            except OSError as exc:
+                self._append_transcript(f"[could not read the merged transcript: {exc}]")
         elif event == "batch_done":
             self._stop_live()
             self._hide_progress_bar()
@@ -1353,6 +1717,14 @@ class MeetingTranscriberApp(ctk.CTk):
         # first just gives the in-flight chunk a chance to checkpoint cleanly.
         self._cancel_event.set()
         self._stop_live()
+        # Closing mid-take would otherwise leave the WAV header unfinalised and
+        # the recording unplayable; stopping first keeps whatever was captured.
+        if self._recorder is not None and self._recorder.running:
+            try:
+                self._recorder.stop()
+            except Exception:
+                pass
+            self._recorder = None
         self.destroy()
 
 
