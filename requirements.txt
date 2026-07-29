@@ -1,0 +1,34 @@
+# Reconstructed from the imports actually used across app.py, transcriber.py,
+# chunking.py, mlx_engine.py, phowhisper.py, audio_capture.py, and
+# transcript_merge.py — the original pinned requirements.txt isn't present in
+# this checkout (it's caught by .gitignore's `*.txt` and was never committed).
+# No versions are pinned here; re-pin once a known-good set is confirmed.
+
+# Core
+customtkinter
+numpy
+openai-whisper
+
+# vi-mode: PhoWhisper-large via WhisperX/CTranslate2
+whisperx
+ctranslate2
+transformers
+huggingface_hub
+
+# Live meeting recording (audio_capture.py)
+sounddevice
+soundfile
+scipy
+
+# Optional: drag-and-drop file import (app.py._setup_dnd, best-effort/guarded)
+tkinterdnd2
+
+# Optional: Apple-GPU Whisper engine (mlx_engine.py, Apple silicon only)
+mlx-whisper; sys_platform == "darwin" and platform_machine == "arm64"
+
+# Optional: macOS system-audio capture via ScreenCaptureKit (audio_capture.py,
+# macOS 13+ only — LoopbackDeviceCapture is the fallback when these are absent)
+pyobjc-framework-Cocoa; sys_platform == "darwin"
+pyobjc-framework-ScreenCaptureKit; sys_platform == "darwin"
+pyobjc-framework-CoreMedia; sys_platform == "darwin"
+pyobjc-framework-libdispatch; sys_platform == "darwin"

@@ -12,3 +12,4 @@ __pycache__/
 *.transcript.partial.json
 *.transcript.partial.json.tmp
 !.data/*.mp3
+!requirements.txt
