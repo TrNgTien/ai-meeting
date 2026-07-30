@@ -57,3 +57,40 @@ run-docker-cli:
 
 clean:
 	docker rmi $(IMAGE_NAME) || true
+
+# --- Rust + Tauri port (desktop/) ---------------------------------------------
+# Additive: every target above keeps working unchanged, so the Python app stays
+# runnable while the port catches up and the two can be compared on real audio.
+
+DESKTOP = desktop
+
+.PHONY: desktop-setup desktop-dev desktop-build desktop-test desktop-parity
+
+# Frontend dependencies (React + Vite + the Tauri CLI). Rust deps come down on
+# the first cargo build.
+desktop-setup:
+	cd $(DESKTOP) && pnpm install
+
+desktop-dev: desktop-setup
+	cd $(DESKTOP) && pnpm tauri dev
+
+desktop-build: desktop-setup
+	cd $(DESKTOP) && pnpm tauri build
+
+desktop-test:
+	cd $(DESKTOP)/src-tauri && cargo test
+
+# Prove the Rust chunk decode/split is faithful to the Python app's: same
+# boundaries and same sample checksums on the same file, or the A/B transcript
+# comparison would be measuring the decoder instead of the model.
+# Usage: make desktop-parity FILE=data/meeting.mp3
+desktop-parity: $(STAMP)
+	@if [ -z "$(FILE)" ]; then \
+		echo "Usage: make desktop-parity FILE=your_audio_file.mp3"; \
+		exit 1; \
+	fi
+	@cd $(DESKTOP)/src-tauri && cargo run --quiet --example chunk_parity -- "$(CURDIR)/$(FILE)" 4 > "$(CURDIR)/.parity-rust.txt"
+	@$(PY) $(DESKTOP)/scripts/chunk_parity.py "$(FILE)" 4 > "$(CURDIR)/.parity-python.txt"
+	@diff -u .parity-python.txt .parity-rust.txt \
+		&& echo "==> chunk boundaries and sample checksums match"
+	@rm -f .parity-rust.txt .parity-python.txt
