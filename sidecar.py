@@ -201,6 +201,87 @@ class Sidecar:
         language = self._transcriber.language or "auto"
         return f"whisper-{final_model_name}:{language}", self._transcriber.transcribe_audio
 
+    def cmd_start_transcription(self, msg: dict) -> None:
+        if self._current_job_id is not None:
+            emit("error", message=f"job '{self._current_job_id}' is already running")
+            return
+
+        job_id = msg["id"]
+        paths = [Path(p) for p in msg["paths"]]
+        lang_mode = msg.get("lang_mode", "vi+en")
+        model_name = msg.get("model", FINAL_MODEL)
+        use_mlx = msg.get("mlx", self._use_mlx)
+
+        audio_paths = [p for p in paths if p.is_file() and p.suffix.lower() in AUDIO_EXTS]
+
+        self._current_job_id = job_id
+        self._cancel_event = threading.Event()
+
+        def worker() -> None:
+            saved: list[str] = []
+            total = len(audio_paths)
+            cancelled = False
+            batch_started = time.monotonic()
+            for idx, source in enumerate(audio_paths, start=1):
+                counter = f" {idx}/{total}" if total > 1 else ""
+                label = f"Transcribing{counter}: {source.name}"
+                emit("status", message=f"{label}…")
+                emit("file_start", name=source.name)
+                try:
+                    written = self._run_final_transcription(
+                        source, label, lang_mode, model_name, use_mlx
+                    )
+                except TranscriptionCancelled:
+                    cancelled = True
+                    break
+                except Exception as exc:
+                    emit("error", file=source.name, message=str(exc))
+                    continue
+                saved.append(str(written))
+            emit(
+                "batch_done",
+                id=job_id,
+                count=len(saved),
+                saved=saved,
+                cancelled=cancelled,
+                elapsed_sec=time.monotonic() - batch_started,
+            )
+            self._current_job_id = None
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_final_transcription(
+        self, wav_path: Path, label: str, lang_mode: str, model_name: str, use_mlx: bool
+    ) -> Path:
+        engine_key, transcribe_audio = self._resolve_engine(lang_mode, model_name, use_mlx)
+        out_path = resolve_transcript_path(wav_path, engine_key)
+
+        resume_at = resumable_seconds(wav_path, engine_key)
+        if resume_at > 0:
+            emit("chunk_baseline", resume_at_sec=resume_at)
+            emit("status", message=f"{label} — resuming at {format_timestamp(resume_at)}…")
+
+        def on_progress(chunk_index, chunks_done, done_sec, total_sec) -> None:
+            emit(
+                "chunk_progress",
+                label=label,
+                done_sec=done_sec,
+                total_sec=total_sec,
+                chunks_done=chunks_done,
+            )
+
+        transcribe_chunked(
+            wav_path,
+            transcribe_audio=transcribe_audio,
+            engine_key=engine_key,
+            output_path=out_path,
+            on_progress=on_progress,
+            on_text=lambda text: emit("chunk_text", text=text),
+            on_segment=lambda segment: emit("segment_text", text=segment.format_line()),
+            cancel_event=self._cancel_event,
+        )
+        return out_path
+
 
 def main() -> None:
     sidecar = Sidecar()
