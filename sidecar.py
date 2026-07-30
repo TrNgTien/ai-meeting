@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import mlx_engine
 from chunking import (
@@ -138,6 +138,68 @@ class Sidecar:
             emit("error", message=f"no running job '{job_id}'")
             return
         self._cancel_event.set()
+
+    def _resolve_engine(
+        self, lang_mode: str, model_name: str, use_mlx: bool
+    ) -> Tuple[str, TranscribeAudio]:
+        if lang_mode == "vi+en":
+            self._transcriber.set_language("vi")
+            use_phowhisper = False
+        elif lang_mode == "vi":
+            self._transcriber.set_language("vi")
+            use_phowhisper = True
+        else:
+            self._transcriber.set_language(lang_mode)
+            use_phowhisper = False
+
+        if not use_phowhisper:
+            self._transcriber.set_final_model(model_name)
+
+        if use_phowhisper and self._transcriber.language == "vi":
+            try:
+                if not self._final_transcriber.is_ready():
+                    emit("status", message="Installing PhoWhisper-large (one-time download)…")
+                self._final_transcriber.preload(
+                    progress_cb=lambda m, d, t: emit(
+                        "download_progress", model=m, downloaded=d, total=t
+                    ),
+                    status_cb=lambda msg: emit("status", message=msg),
+                )
+                emit("hide_progress")
+                return "phowhisper-large:vi", self._final_transcriber.transcribe_audio
+            except Exception as exc:
+                emit("hide_progress")
+                emit(
+                    "status",
+                    message=f"PhoWhisper failed ({exc}); falling back to "
+                    f"{self._transcriber.final_model_name}…",
+                )
+
+        final_model_name = self._transcriber.final_model_name
+
+        if use_mlx and mlx_engine.repo_for(final_model_name) is not None:
+            try:
+                engine = mlx_engine.MLXTranscriber(final_model_name, self._transcriber.language)
+                emit("status", message=f"Loading '{final_model_name}' on the Apple GPU (MLX)…")
+                engine.preload(
+                    progress_cb=lambda m, d, t: emit(
+                        "download_progress", model=m, downloaded=d, total=t
+                    ),
+                    status_cb=lambda msg: emit("status", message=msg),
+                )
+                emit("hide_progress")
+                return engine.engine_key, engine.transcribe_audio
+            except Exception as exc:
+                emit("hide_progress")
+                emit("status", message=f"MLX unavailable ({exc}); using the CPU engine…")
+
+        emit("status", message=f"Loading model '{final_model_name}' (downloads on first use)…")
+        self._transcriber.preload_final_model(
+            progress_cb=lambda m, d, t: emit("download_progress", model=m, downloaded=d, total=t)
+        )
+        emit("hide_progress")
+        language = self._transcriber.language or "auto"
+        return f"whisper-{final_model_name}:{language}", self._transcriber.transcribe_audio
 
 
 def main() -> None:
