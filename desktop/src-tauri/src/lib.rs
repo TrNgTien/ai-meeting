@@ -14,7 +14,9 @@
 
 pub mod audio;
 pub mod chunking;
+pub mod commands;
 pub mod merge;
+pub mod sidecar;
 pub mod state;
 pub mod transcribe;
 
@@ -24,12 +26,26 @@ pub mod transcribe;
 pub const SAMPLE_RATE: u32 = 16_000;
 
 use state::AppState;
+use tauri::Manager;
 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
+        .setup(|app| {
+            let sidecar_state = sidecar::spawn(app.handle())?;
+            app.manage(sidecar_state);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::list_models,
+            commands::download_model,
+            commands::delete_model,
+            commands::cancel_download,
+            commands::start_transcription,
+            commands::cancel_job,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running the Meeting Transcriber");
 }
