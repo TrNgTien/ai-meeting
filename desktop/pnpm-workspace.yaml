@@ -1,0 +1,6 @@
+# pnpm 10+ blocks dependency build scripts by default. esbuild needs its
+# postinstall to unpack the native binary Vite links against, so it is allowed
+# explicitly here rather than through the interactive `pnpm approve-builds`,
+# which would leave the decision undocumented on another machine.
+allowBuilds:
+  esbuild: true
