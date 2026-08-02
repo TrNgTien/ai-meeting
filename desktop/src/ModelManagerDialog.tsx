@@ -59,50 +59,52 @@ export default function ModelManagerDialog({ onClose }: { onClose: () => void })
   }, []);
 
   return (
-    <div className="model-manager">
-      <div className="model-manager-header">
-        <h2>Manage models</h2>
-        <button onClick={onClose}>Close</button>
+    <div className="model-manager-overlay">
+      <div className="model-manager">
+        <div className="model-manager-header">
+          <h2>Manage models</h2>
+          <button onClick={onClose}>Close</button>
+        </div>
+        <table>
+          <tbody>
+            {models.map((model) => {
+              const inFlight = progress[model.name];
+              return (
+                <tr key={model.name}>
+                  <td>{model.name}</td>
+                  <td>
+                    {inFlight ? (
+                      <progress
+                        value={inFlight.downloaded}
+                        max={inFlight.total || undefined}
+                      />
+                    ) : model.downloaded ? (
+                      `${(model.size_bytes / 1_000_000).toFixed(0)} MB`
+                    ) : (
+                      "not downloaded"
+                    )}
+                  </td>
+                  <td>
+                    {inFlight ? (
+                      <button onClick={() => invoke("cancel_download", { name: model.name })}>
+                        Cancel
+                      </button>
+                    ) : model.downloaded ? (
+                      <button onClick={() => invoke("delete_model", { name: model.name })}>
+                        Delete
+                      </button>
+                    ) : (
+                      <button onClick={() => invoke("download_model", { name: model.name })}>
+                        Download
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
-      <table>
-        <tbody>
-          {models.map((model) => {
-            const inFlight = progress[model.name];
-            return (
-              <tr key={model.name}>
-                <td>{model.name}</td>
-                <td>
-                  {inFlight ? (
-                    <progress
-                      value={inFlight.downloaded}
-                      max={inFlight.total || undefined}
-                    />
-                  ) : model.downloaded ? (
-                    `${(model.size_bytes / 1_000_000).toFixed(0)} MB`
-                  ) : (
-                    "not downloaded"
-                  )}
-                </td>
-                <td>
-                  {inFlight ? (
-                    <button onClick={() => invoke("cancel_download", { name: model.name })}>
-                      Cancel
-                    </button>
-                  ) : model.downloaded ? (
-                    <button onClick={() => invoke("delete_model", { name: model.name })}>
-                      Delete
-                    </button>
-                  ) : (
-                    <button onClick={() => invoke("download_model", { name: model.name })}>
-                      Download
-                    </button>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
     </div>
   );
 }
