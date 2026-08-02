@@ -76,10 +76,40 @@ export default function TranscriptPane({
         <div className="banner-error">Backend disconnected — restart the app.</div>
       )}
       <div className="status-line">{status}</div>
-      <div ref={boxRef} className="transcript-box card">
-        <pre>{text}</pre>
-        {preview && <pre className="preview">{preview}</pre>}
+      <div ref={boxRef} className="transcript-box">
+        {text
+          .split("\n")
+          .filter((line) => line.length > 0)
+          .map((line, i) => (
+            <TranscriptLine key={i} line={line} />
+          ))}
+        {preview && (
+          <div className="transcript-row preview">
+            <TranscriptLine line={preview} />
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+// Each real transcript line is "[HH:MM:SS] text" (transcriber.py's
+// Segment.format_line); render the timestamp as its own muted column,
+// matching the reference design's timestamped-row layout. Separators
+// ("===== file ====="), errors, and summaries don't match and fall back to
+// a plain row.
+const TIMESTAMP_LINE = /^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s(.*)$/;
+
+function TranscriptLine({ line }: { line: string }) {
+  const match = line.match(TIMESTAMP_LINE);
+  if (match) {
+    const [, timestamp, rest] = match;
+    return (
+      <div className="transcript-row">
+        <span className="transcript-timestamp">{timestamp}</span>
+        <span className="transcript-text">{rest}</span>
+      </div>
+    );
+  }
+  return <div className="transcript-row plain">{line}</div>;
 }

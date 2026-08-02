@@ -1,12 +1,15 @@
 import { useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import ModelManagerDialog from "./ModelManagerDialog";
-import EngineControls, { EngineState } from "./EngineControls";
+import type { EngineState } from "./EngineControls";
 import BatchImportBar from "./BatchImportBar";
 import TranscriptPane from "./TranscriptPane";
+import SettingsPane from "./SettingsPane";
+import { StopIcon, GearIcon, DocIcon } from "./icons";
+
+type Tab = "transcript" | "settings";
 
 export default function App() {
-  const [managingModels, setManagingModels] = useState(false);
+  const [tab, setTab] = useState<Tab>("transcript");
   const [engine, setEngine] = useState<EngineState>({
     langMode: "vi+en",
     model: "small",
@@ -38,23 +41,54 @@ export default function App() {
   }, []);
 
   return (
-    <main className="shell">
-      <div className="app-header">
-        <h1>Meeting Transcriber</h1>
-        <p className="muted">Local, offline, Vietnamese-first meeting transcription.</p>
-      </div>
-      <div className="card">
-        <EngineControls value={engine} onChange={setEngine} />
-        <div className="toolbar">
-          <BatchImportBar disabled={jobId !== null} onImport={handleImport} />
-          <button className="destructive" disabled={jobId === null} onClick={handleCancel}>
-            Cancel
+    <div className="app-shell">
+      <aside className="icon-rail">
+        {jobId === null ? (
+          <BatchImportBar disabled={false} iconOnly onImport={handleImport} />
+        ) : (
+          <button
+            className="rail-btn primary recording"
+            onClick={handleCancel}
+            title="Cancel transcription"
+            aria-label="Cancel transcription"
+          >
+            <StopIcon />
           </button>
-          <button onClick={() => setManagingModels(true)}>Manage models</button>
+        )}
+        <div className="rail-spacer" />
+        <button
+          className="rail-btn"
+          onClick={() => setTab("settings")}
+          title="Settings"
+          aria-label="Settings"
+        >
+          <GearIcon />
+        </button>
+      </aside>
+      <div className="app-main">
+        <nav className="pill-nav">
+          <button
+            className={tab === "transcript" ? "pill active" : "pill"}
+            onClick={() => setTab("transcript")}
+          >
+            <DocIcon /> Transcript
+          </button>
+          <button
+            className={tab === "settings" ? "pill active" : "pill"}
+            onClick={() => setTab("settings")}
+          >
+            <GearIcon /> Settings
+          </button>
+        </nav>
+        <div className="content-card">
+          <h1 className="content-title">Meeting Transcriber</h1>
+          {tab === "transcript" ? (
+            <TranscriptPane onJobDone={handleJobDone} />
+          ) : (
+            <SettingsPane engine={engine} onEngineChange={setEngine} />
+          )}
         </div>
       </div>
-      <TranscriptPane onJobDone={handleJobDone} />
-      {managingModels && <ModelManagerDialog onClose={() => setManagingModels(false)} />}
-    </main>
+    </div>
   );
 }
