@@ -4,9 +4,10 @@ import type { EngineState } from "./EngineControls";
 import BatchImportBar from "./BatchImportBar";
 import TranscriptPane from "./TranscriptPane";
 import SettingsPane from "./SettingsPane";
-import { StopIcon, GearIcon, DocIcon } from "./icons";
+import FilesPane from "./FilesPane";
+import { StopIcon, GearIcon, DocIcon, FolderIcon } from "./icons";
 
-type Tab = "transcript" | "settings";
+type Tab = "transcript" | "files" | "settings";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("transcript");
@@ -74,6 +75,12 @@ export default function App() {
             <DocIcon /> Transcript
           </button>
           <button
+            className={tab === "files" ? "pill active" : "pill"}
+            onClick={() => setTab("files")}
+          >
+            <FolderIcon /> Files
+          </button>
+          <button
             className={tab === "settings" ? "pill active" : "pill"}
             onClick={() => setTab("settings")}
           >
@@ -82,12 +89,19 @@ export default function App() {
         </nav>
         <div className="content-card">
           <h1 className="content-title">Meeting Transcriber</h1>
-          {/* Both panes stay mounted so TranscriptPane keeps listening for
-              sidecar events (and keeps its accumulated text) while the
-              Settings tab is showing, instead of losing state/events on
-              every tab switch. */}
+          {/* All panes stay mounted so TranscriptPane/FilesPane keep
+              listening for sidecar events (and keep their accumulated
+              state) while another tab is showing, instead of losing
+              state/events on every tab switch. */}
           <div className={tab === "transcript" ? "tab-panel" : "tab-panel hidden"}>
-            <TranscriptPane running={jobId !== null} onJobDone={handleJobDone} />
+            <TranscriptPane
+              running={jobId !== null}
+              onImport={handleImport}
+              onJobDone={handleJobDone}
+            />
+          </div>
+          <div className={tab === "files" ? "tab-panel" : "tab-panel hidden"}>
+            <FilesPane />
           </div>
           <div className={tab === "settings" ? "tab-panel" : "tab-panel hidden"}>
             <SettingsPane engine={engine} onEngineChange={setEngine} />

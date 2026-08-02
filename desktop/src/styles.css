@@ -240,6 +240,21 @@ body {
   overflow: auto;
 }
 
+.transcript-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  text-align: center;
+}
+
+.transcript-empty .muted {
+  max-width: 32ch;
+}
+
 .transcript-row {
   display: flex;
   gap: 1rem;
@@ -370,5 +385,42 @@ button:disabled {
   flex-shrink: 0;
   color: hsl(var(--muted-foreground));
   font-size: 13px;
+  white-space: nowrap;
+}
+
+/* Files */
+.files-pane {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.files-empty {
+  margin: 0;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.file-info {
+  min-width: 0;
+}
+
+.file-name {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.file-path {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
