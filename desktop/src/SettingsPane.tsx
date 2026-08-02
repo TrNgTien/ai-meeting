@@ -96,7 +96,7 @@ export default function SettingsPane({
                       </span>
                     </div>
                   ) : model.downloaded ? (
-                    `${(model.size_bytes / 1_000_000).toFixed(0)} MB`
+                    `${formatGb(model.size_bytes)} GB`
                   ) : (
                     "not downloaded"
                   )}
