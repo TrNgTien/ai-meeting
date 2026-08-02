@@ -70,7 +70,7 @@ DESKTOP = desktop
 # though each target's recipe runs in its own subshell.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 
-.PHONY: desktop-setup desktop-dev desktop-build desktop-test desktop-parity desktop-release desktop-install
+.PHONY: desktop-setup desktop-build-sidecar desktop-dev desktop-build desktop-test desktop-parity desktop-release desktop-install
 
 # Frontend dependencies (React + Vite + the Tauri CLI), plus the Rust toolchain
 # and cmake that tauri/whisper-rs-sys need to build. Installs whatever is
@@ -97,11 +97,19 @@ desktop-setup:
 	@echo "    shell, restart your terminal (or run: . \"\$$HOME/.cargo/env\") before"
 	@echo "    running make desktop-dev."
 
+# Packages sidecar.py + its Python deps into a self-contained executable at
+# desktop/src-tauri/sidecar-dist/sidecar/sidecar, so the Tauri app never shells
+# out to the repo's .venv — it's bundled as a Tauri resource instead, which is
+# what makes the built .app portable (survives the repo moving/being deleted,
+# or being copied to another Mac).
+desktop-build-sidecar: $(STAMP)
+	./$(DESKTOP)/scripts/build-sidecar.sh
+
 desktop-dev: export MACOSX_DEPLOYMENT_TARGET ?= 14.0
-desktop-dev: desktop-setup
+desktop-dev: desktop-setup desktop-build-sidecar
 	cd $(DESKTOP) && pnpm tauri dev
 
-desktop-build: desktop-setup
+desktop-build: desktop-setup desktop-build-sidecar
 	cd $(DESKTOP) && pnpm tauri build
 
 desktop-test:
@@ -109,7 +117,7 @@ desktop-test:
 
 # Builds the .dmg and copies it to desktop/dist-release/MeetingTranscriber-<version>.dmg
 # so it can be handed to someone else directly.
-desktop-release: desktop-setup
+desktop-release: desktop-setup desktop-build-sidecar
 	cd $(DESKTOP) && ./scripts/build-release.sh
 
 # Builds and installs straight to /Applications on this Mac, replacing

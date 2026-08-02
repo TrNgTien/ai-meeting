@@ -1,8 +1,10 @@
-//! Spawns and owns the `sidecar.py` child process: the persistent Python
-//! subprocess that does the actual transcription/model-management work by
-//! calling the existing, unchanged `transcriber.py`/`chunking.py`/
-//! `mlx_engine.py`/`phowhisper.py` modules. See
-//! `docs/superpowers/specs/2026-07-29-tauri-rust-rewrite-design.md`.
+//! Spawns and owns the `sidecar` child process: a PyInstaller-built,
+//! self-contained executable (see `desktop/scripts/build-sidecar.sh`) wrapping
+//! `sidecar.py`, the persistent Python subprocess that does the actual
+//! transcription/model-management work by calling the existing, unchanged
+//! `transcriber.py`/`chunking.py`/`mlx_engine.py`/`phowhisper.py` modules.
+//! Bundled as a Tauri resource rather than shelling out to the repo's `.venv`,
+//! so the built `.app` doesn't depend on the source checkout.
 //!
 //! One process per app session: `sidecar.py`'s own single-worker-thread
 //! assumption (it taps `transcriber.stream_segments()`'s stdout redirection
@@ -17,7 +19,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use serde_json::json;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// The event every parsed sidecar stdout line (and the synthetic
 /// disconnect notice below) is forwarded to the frontend as.
@@ -47,37 +49,41 @@ impl SidecarState {
     }
 }
 
-/// `desktop/src-tauri` -> `desktop` -> the repo root that holds `sidecar.py`
-/// and `.venv`.
-///
-/// Only correct for `cargo tauri dev`, where `CARGO_MANIFEST_DIR` points at
-/// the source tree. A bundled `.app` has no such directory and will need
-/// `sidecar.py`/`.venv` shipped as Tauri resources instead — out of scope
-/// until the design doc's phase 5 (packaging).
-fn repo_root() -> Result<PathBuf> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .map(PathBuf::from)
-        .context("desktop/src-tauri has no grandparent directory")
+/// The PyInstaller onedir bundle at `resources/sidecar/` (see
+/// `desktop/scripts/build-sidecar.sh` and `tauri.conf.json`'s
+/// `bundle.resources`) is a self-contained executable — no system Python or
+/// `.venv` required. `tauri dev` stages configured resources next to the dev
+/// binary the same way `tauri build` does for the bundled `.app`, so this one
+/// path resolves correctly in both cases.
+fn sidecar_binary_path(app: &AppHandle) -> Result<PathBuf> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .context("could not resolve the app's resource directory")?;
+    let binary = resource_dir.join("sidecar").join("sidecar");
+    anyhow::ensure!(
+        binary.exists(),
+        "sidecar binary not found at {} — run `make desktop-build-sidecar` first",
+        binary.display()
+    );
+    Ok(binary)
 }
 
-/// Spawn `sidecar.py` under the repo's `.venv` and start the stdout-reader
-/// thread that forwards each line to the frontend as a [`SIDECAR_EVENT`].
+/// Spawn the bundled `sidecar` executable and start the stdout-reader thread
+/// that forwards each line to the frontend as a [`SIDECAR_EVENT`].
 pub fn spawn(app: &AppHandle) -> Result<SidecarState> {
-    let repo_root = repo_root()?;
-    let python = repo_root.join(".venv/bin/python");
-    let sidecar_py = repo_root.join("sidecar.py");
+    let sidecar_bin = sidecar_binary_path(app)?;
+    let sidecar_dir = sidecar_bin
+        .parent()
+        .context("sidecar binary has no parent directory")?;
 
-    let mut child = Command::new(&python)
-        .arg(&sidecar_py)
-        .current_dir(&repo_root)
+    let mut child = Command::new(&sidecar_bin)
+        .current_dir(sidecar_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("cannot spawn {} {}", python.display(), sidecar_py.display()))?;
+        .with_context(|| format!("cannot spawn {}", sidecar_bin.display()))?;
 
     let stdin = child.stdin.take().context("sidecar child has no stdin")?;
     let stdout = child.stdout.take().context("sidecar child has no stdout")?;
