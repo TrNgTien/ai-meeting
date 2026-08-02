@@ -176,6 +176,18 @@ body {
   margin: 0 0 1rem;
 }
 
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+}
+
+.tab-panel.hidden {
+  display: none;
+}
+
 /* Transcript */
 .transcript-pane {
   display: flex;
@@ -255,6 +267,8 @@ body {
 
 .transcript-text {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .banner-error {
@@ -269,6 +283,8 @@ body {
 /* Settings */
 .settings-pane {
   overflow: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .section-heading {

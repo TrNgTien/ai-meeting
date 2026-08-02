@@ -82,11 +82,16 @@ export default function App() {
         </nav>
         <div className="content-card">
           <h1 className="content-title">Meeting Transcriber</h1>
-          {tab === "transcript" ? (
+          {/* Both panes stay mounted so TranscriptPane keeps listening for
+              sidecar events (and keeps its accumulated text) while the
+              Settings tab is showing, instead of losing state/events on
+              every tab switch. */}
+          <div className={tab === "transcript" ? "tab-panel" : "tab-panel hidden"}>
             <TranscriptPane running={jobId !== null} onJobDone={handleJobDone} />
-          ) : (
+          </div>
+          <div className={tab === "settings" ? "tab-panel" : "tab-panel hidden"}>
             <SettingsPane engine={engine} onEngineChange={setEngine} />
-          )}
+          </div>
         </div>
       </div>
     </div>
