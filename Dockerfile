@@ -20,5 +20,5 @@ COPY . .
 # Default command to run the GUI app
 # Note: Running GUI from Docker on macOS requires XQuartz and DISPLAY configuration.
 # To run headless transcription instead, override the command:
-# docker run -v $(pwd):/app/data meeting-transcriber python transcriber.py /app/data/file.mp3
+# docker run -v $(pwd):/app/data transcriber python transcriber.py /app/data/file.mp3
 CMD ["python", "app.py"]

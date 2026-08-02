@@ -1,4 +1,4 @@
-//! Meeting Transcriber — local-only, Vietnamese-first meeting transcription.
+//! Transcriber — local-only, Vietnamese-first meeting transcription.
 //!
 //! A Rust/Tauri port of the Python/Tkinter app that lives at the repo root. The
 //! engines changed (whisper.cpp + Metal in place of openai-whisper and MLX);
@@ -45,7 +45,8 @@ pub fn run() {
             commands::cancel_download,
             commands::start_transcription,
             commands::cancel_job,
+            commands::delete_transcript,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running the Meeting Transcriber");
+        .expect("error while running the Transcriber");
 }

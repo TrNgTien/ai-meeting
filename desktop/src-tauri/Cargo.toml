@@ -1,5 +1,5 @@
 [package]
-name = "ai-meeting-desktop"
+name = "transcriber"
 version = "0.1.0"
 description = "Local-only meeting transcriber, Vietnamese-first"
 authors = ["Tien Tran"]
@@ -9,14 +9,14 @@ rust-version = "1.82"
 [lib]
 # `staticlib`/`cdylib` are what the mobile targets link against; `rlib` is what
 # main.rs and the integration tests use.
-name = "ai_meeting_lib"
+name = "transcriber_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 

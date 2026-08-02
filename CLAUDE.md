@@ -50,7 +50,7 @@ taking 16 kHz mono float32; `offset_sec` shifts the chunk's timestamps back onto
 | mlx-whisper on Apple GPU | `mlx_engine.MLXTranscriber` | same modes, when the GPU switch is on and a checkpoint exists |
 | PhoWhisper-large via WhisperX/CTranslate2 | `transcriber.WhisperXTranscriber` | `vi` only |
 
-Routing is `MeetingTranscriberApp._apply_language_selection()` (UI choice → language + `_use_phowhisper`) then `_prepare_engine()` (loads/downloads, returns `(engine_key, transcribe_audio)`). Both PhoWhisper and MLX failures fall back to the CPU whisper engine with a status message rather than failing the run — preserve that when touching `_prepare_engine`.
+Routing is `TranscriberApp._apply_language_selection()` (UI choice → language + `_use_phowhisper`) then `_prepare_engine()` (loads/downloads, returns `(engine_key, transcribe_audio)`). Both PhoWhisper and MLX failures fall back to the CPU whisper engine with a status message rather than failing the run — preserve that when touching `_prepare_engine`.
 
 ### Chunked, resumable transcription
 
@@ -72,7 +72,7 @@ Preview lines carry the `preview` Tk tag and are *not* on disk; `_drop_preview()
 
 ### Threading / UI
 
-`app.py` is a single `MeetingTranscriberApp(ctk.CTk)` with an `AppState` enum (`IDLE`/`RECORDING`/`TRANSCRIBING`). All work happens on worker threads that push `(event, payload)` tuples onto `self._ui_queue`; `_poll_ui_queue()` drains it on the Tk thread. Never touch widgets from a worker — add a queue event instead. Existing events include `status`, `chunk_text`, `segment_text`, `file_start`, `chunk_baseline`, `batch_done`, `rec_started`/`rec_stopped`/`rec_failed`, `merged_text`, `mm_download_*`, `hide_progress`.
+`app.py` is a single `TranscriberApp(ctk.CTk)` with an `AppState` enum (`IDLE`/`RECORDING`/`TRANSCRIBING`). All work happens on worker threads that push `(event, payload)` tuples onto `self._ui_queue`; `_poll_ui_queue()` drains it on the Tk thread. Never touch widgets from a worker — add a queue event instead. Existing events include `status`, `chunk_text`, `segment_text`, `file_start`, `chunk_baseline`, `batch_done`, `rec_started`/`rec_stopped`/`rec_failed`, `merged_text`, `mm_download_*`, `hide_progress`.
 
 ### Live recording
 

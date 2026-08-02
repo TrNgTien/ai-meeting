@@ -10,11 +10,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ai_meeting_lib::chunking::checkpoint::{checkpoint_path, load_checkpoint, source_fingerprint};
-use ai_meeting_lib::chunking::{transcribe_chunked, ChunkObserver, ChunkOptions, TranscribeError};
-use ai_meeting_lib::state::CancelFlag;
-use ai_meeting_lib::transcribe::{Engine, SegmentSink, TranscriptSegment};
-use ai_meeting_lib::SAMPLE_RATE;
+use transcriber_lib::chunking::checkpoint::{checkpoint_path, load_checkpoint, source_fingerprint};
+use transcriber_lib::chunking::{transcribe_chunked, ChunkObserver, ChunkOptions, TranscribeError};
+use transcriber_lib::state::CancelFlag;
+use transcriber_lib::transcribe::{Engine, SegmentSink, TranscriptSegment};
+use transcriber_lib::SAMPLE_RATE;
 
 const CHUNK_SEC: f64 = 5.0;
 

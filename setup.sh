@@ -7,7 +7,7 @@ set -euo pipefail
 # Python versions this project is known to work on, best first.
 SUPPORTED_VERSIONS=(3.10 3.11 3.12)
 
-echo "==> Meeting Transcriber setup"
+echo "==> Transcriber setup"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 

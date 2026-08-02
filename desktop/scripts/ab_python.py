@@ -1,6 +1,6 @@
 """Transcribe a file the way the *Python* app does, for A/B against the Rust port.
 
-Mirrors `app.MeetingTranscriberApp._prepare_engine()`'s CPU whisper path exactly:
+Mirrors `app.TranscriberApp._prepare_engine()`'s CPU whisper path exactly:
 the same `Transcriber`, the same language routing, the same `transcribe_chunked`
 driver and chunk size. Only the engine differs from the Rust build, which is the
 point — anything else differing would mean the port is wrong.

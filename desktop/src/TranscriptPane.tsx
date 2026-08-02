@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import ImportZone from "./ImportZone";
+import ImportZone, { pickAudioFiles } from "./ImportZone";
+import { StopIcon, UploadIcon } from "./icons";
 
 /** Mirrors app.py's _handle_ui_event (app.py:1360-1477): status line, saved
  * text, and a dimmed live-preview line that's replaced wholesale by the next
@@ -10,16 +11,34 @@ export default function TranscriptPane({
   running,
   onImport,
   onJobDone,
+  onCancel,
 }: {
   running: boolean;
   onImport: (paths: string[]) => void;
   onJobDone: () => void;
+  onCancel: () => void;
 }) {
   const [status, setStatus] = useState("");
   const [text, setText] = useState("");
   const [preview, setPreview] = useState("");
   const [disconnected, setDisconnected] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
+
+  async function handleImportMore() {
+    const paths = await pickAudioFiles();
+    if (paths.length > 0) onImport(paths);
+  }
+
+  // A fresh job (running flips false -> true) supersedes any earlier
+  // "Stopping…" state and leftover transcript text from the previous run.
+  useEffect(() => {
+    if (running) {
+      setStopping(false);
+      setText("");
+      setPreview("");
+    }
+  }, [running]);
 
   useEffect(() => {
     const unlisten = listen<Record<string, unknown>>("sidecar-event", (event) => {
@@ -47,11 +66,18 @@ export default function TranscriptPane({
           setPreview("");
           const count = payload.count as number;
           const took = Math.round(payload.elapsed_sec as number);
-          const summary = payload.cancelled
+          const cancelled = Boolean(payload.cancelled);
+          const summary = cancelled
             ? `Stopped after ${took}s. ${count} file(s) finished; partial progress saved.`
             : `Done in ${took}s. Transcribed ${count} file(s).`;
           setStatus(summary);
-          setText((prev) => `${prev}\n${summary}`);
+          if (cancelled && count === 0) {
+            // Nothing usable came out of this run — go back to the import
+            // screen instead of showing a stub transcript.
+            setText("");
+          } else {
+            setText((prev) => `${prev}\n${summary}`);
+          }
           onJobDone();
           break;
         }
@@ -63,6 +89,7 @@ export default function TranscriptPane({
         }
         case "_sidecar_exited":
           setDisconnected(true);
+          onJobDone();
           break;
       }
     });
@@ -83,10 +110,34 @@ export default function TranscriptPane({
       {running && (
         <div className="running-banner">
           <span className="running-dot" />
-          {status || "Starting…"}
+          <span className="running-status">
+            {stopping ? "Stopping — finishing the current chunk…" : status || "Starting…"}
+          </span>
+          <button
+            className="running-stop-btn"
+            onClick={() => {
+              setStopping(true);
+              onCancel();
+            }}
+            disabled={stopping}
+            title="Stop transcription"
+            aria-label="Stop transcription"
+          >
+            <StopIcon />
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
         </div>
       )}
-      {!running && <div className="status-line">{status}</div>}
+      {!running && text && (
+        <div className="status-line">
+          <span>{status}</span>
+          <button className="import-more-btn" onClick={handleImportMore}>
+            <UploadIcon />
+            Import more files…
+          </button>
+        </div>
+      )}
+      {!running && !text && <div className="status-line">{status}</div>}
       {!running && !text ? (
         <div className="transcript-empty">
           <p className="muted">No transcript yet — import an audio file to get started.</p>

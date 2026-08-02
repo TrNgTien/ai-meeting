@@ -117,18 +117,24 @@ def _cached_bytes(repo: str) -> int:
     return total
 
 
-def _byte_reporting_tqdm(model_name: str, progress_cb: ProgressCallback, total: int):
+def _byte_reporting_tqdm(
+    model_name: str,
+    progress_cb: Optional[ProgressCallback],
+    total: int,
+    cancel_event: Optional[threading.Event] = None,
+):
     """A tqdm subclass that forwards the Hub client's own byte counts.
 
     huggingface_hub takes no progress callback, but it does take a
     `tqdm_class`, and it drives those bars itself for every storage backend it
     supports. Hooking the bar is therefore the one progress source that stays
-    correct whether the repo is served over Xet or classic blob storage.
-
-    Only the per-file byte bars are counted; the Hub also opens a "Fetching N
-    files" counter bar, which would otherwise add file counts to a byte total.
+    correct whether the repo is served over Xet or classic blob storage — and,
+    since it fires on every chunk written, the one place able to raise and
+    unwind `snapshot_download` mid-transfer when `cancel_event` is set.
     """
     from huggingface_hub.utils import tqdm as hf_tqdm
+
+    from transcriber import DownloadCancelled
 
     lock = threading.Lock()
     per_bar: dict[int, int] = {}
@@ -140,7 +146,9 @@ def _byte_reporting_tqdm(model_name: str, progress_cb: ProgressCallback, total: 
 
         def update(self, n=1):
             displayed = super().update(n)
-            if self._counts_bytes:
+            if cancel_event is not None and cancel_event.is_set():
+                raise DownloadCancelled(f"Download of '{model_name}' was cancelled")
+            if self._counts_bytes and progress_cb is not None:
                 with lock:
                     per_bar[id(self)] = self.n or 0
                     done = sum(per_bar.values())
@@ -203,18 +211,31 @@ class MLXTranscriber:
         self,
         progress_cb: Optional[ProgressCallback] = None,
         status_cb: Optional[StatusCallback] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> None:
         """Fetch and warm the checkpoint before the first chunk.
 
         Done up front so the download is reported as a download rather than
         showing up as a mysteriously slow first chunk.
+
+        If `cancel_event` is set, this raises `DownloadCancelled` — before the
+        download starts, mid-download (checked on every progress tick), or
+        before the GPU warm-up.
         """
         import mlx_whisper  # imported lazily: optional dependency
+
+        from transcriber import DownloadCancelled
+
+        if cancel_event is not None and cancel_event.is_set():
+            raise DownloadCancelled(f"Download of '{self.model_name}' was cancelled")
 
         if not self.is_ready():
             if status_cb is not None:
                 status_cb(f"Downloading MLX model '{self.model_name}' (one-time)…")
-            self._download(progress_cb)
+            self._download(progress_cb, cancel_event=cancel_event)
+
+        if cancel_event is not None and cancel_event.is_set():
+            raise DownloadCancelled(f"Download of '{self.model_name}' was cancelled")
 
         if status_cb is not None:
             status_cb(f"Loading '{self.model_name}' onto the GPU…")
@@ -228,27 +249,30 @@ class MLXTranscriber:
             verbose=None,
         )
 
-    def _download(self, progress_cb: Optional[ProgressCallback]) -> None:
+    def _download(
+        self,
+        progress_cb: Optional[ProgressCallback],
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
         """Fetch the checkpoint, reporting bytes as they land.
 
         `mlx_whisper.transcribe` would fetch it implicitly on first use, but
         silently — a multi-GB download that looks like the app has hung. So the
         download happens here instead, with the Hub client's own progress bars
         redirected into our callback.
+
+        `cancel_event`, if given, is checked on every progress tick — raising
+        there is the only way to break out of `snapshot_download`, which has
+        no cancellation hook of its own.
         """
         from huggingface_hub import snapshot_download
 
-        if progress_cb is None:
-            snapshot_download(self.repo)
-            return
-
-        total = _remote_bytes(self.repo)
-        snapshot_download(
-            self.repo,
-            tqdm_class=_byte_reporting_tqdm(self.model_name, progress_cb, total),
-        )
+        total = _remote_bytes(self.repo) if progress_cb else 0
+        tqdm_class = _byte_reporting_tqdm(self.model_name, progress_cb, total, cancel_event)
+        snapshot_download(self.repo, tqdm_class=tqdm_class)
         # Land the bar on 100% rather than wherever the last update left it.
-        progress_cb(self.model_name, total or _cached_bytes(self.repo), total)
+        if progress_cb:
+            progress_cb(self.model_name, total or _cached_bytes(self.repo), total)
 
     def transcribe_audio(
         self,

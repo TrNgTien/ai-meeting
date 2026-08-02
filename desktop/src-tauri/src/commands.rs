@@ -15,6 +15,17 @@ use tauri::State;
 
 use crate::sidecar::SidecarState;
 
+/// Deletes a saved transcript file from disk. Scoped to `.txt` so the Files
+/// tab's inline delete button can't be pointed at arbitrary paths.
+#[tauri::command]
+pub fn delete_transcript(path: String) -> Result<(), String> {
+    let path = std::path::Path::new(&path);
+    if path.extension().and_then(|e| e.to_str()) != Some("txt") {
+        return Err("refusing to delete a non-transcript file".into());
+    }
+    std::fs::remove_file(path).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn list_models(state: State<SidecarState>) -> Result<(), String> {
     state.send(json!({"cmd": "list_models"}))

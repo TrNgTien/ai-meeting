@@ -10,13 +10,13 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ai_meeting_lib::chunking::{
+use transcriber_lib::chunking::{
     transcribe_chunked, ChunkObserver, ChunkOptions, DEFAULT_CHUNK_SECONDS,
 };
-use ai_meeting_lib::state::LanguageMode;
-use ai_meeting_lib::transcribe::models::{ensure_model_downloaded, is_model_downloaded};
-use ai_meeting_lib::transcribe::whisper_cpp::WhisperCppEngine;
-use ai_meeting_lib::transcribe::{TranscriptSegment, DEFAULT_MODEL};
+use transcriber_lib::state::LanguageMode;
+use transcriber_lib::transcribe::models::{ensure_model_downloaded, is_model_downloaded};
+use transcriber_lib::transcribe::whisper_cpp::WhisperCppEngine;
+use transcriber_lib::transcribe::{TranscriptSegment, DEFAULT_MODEL};
 
 /// Prints progress the way the Python app's status bar reads.
 struct Printing {
@@ -42,11 +42,11 @@ impl ChunkObserver for Printing {
 
     fn on_progress(&self, chunks_done: usize, done_sec: f64, total_sec: Option<f64>) {
         let total = total_sec
-            .map(ai_meeting_lib::transcribe::format_timestamp)
+            .map(transcriber_lib::transcribe::format_timestamp)
             .unwrap_or_else(|| "??:??:??".into());
         eprintln!(
             "  [chunk {chunks_done}] {} / {total} transcribed (saved)",
-            ai_meeting_lib::transcribe::format_timestamp(done_sec)
+            transcriber_lib::transcribe::format_timestamp(done_sec)
         );
     }
 }
@@ -123,4 +123,4 @@ fn main() -> anyhow::Result<()> {
 }
 
 // `Engine` has to be in scope for `engine.engine_key()` above.
-use ai_meeting_lib::transcribe::Engine;
+use transcriber_lib::transcribe::Engine;

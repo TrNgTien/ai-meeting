@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := start
 
-IMAGE_NAME = meeting-transcriber
+IMAGE_NAME = transcriber
 VENV = .venv
 PY = $(VENV)/bin/python
 STAMP = $(VENV)/.deps-installed
@@ -64,13 +64,40 @@ clean:
 
 DESKTOP = desktop
 
-.PHONY: desktop-setup desktop-dev desktop-build desktop-test desktop-parity
+# rustup installs to ~/.cargo/bin, which a shell only picks up after sourcing
+# ~/.cargo/env (or restarting). Prepending it here means desktop-dev/-build/
+# -test/-parity see `cargo` immediately after desktop-setup installs it, even
+# though each target's recipe runs in its own subshell.
+export PATH := $(HOME)/.cargo/bin:$(PATH)
 
-# Frontend dependencies (React + Vite + the Tauri CLI). Rust deps come down on
-# the first cargo build.
+.PHONY: desktop-setup desktop-dev desktop-build desktop-test desktop-parity desktop-release desktop-install
+
+# Frontend dependencies (React + Vite + the Tauri CLI), plus the Rust toolchain
+# and cmake that tauri/whisper-rs-sys need to build. Installs whatever is
+# missing so a fresh machine can go straight to desktop-dev. Rust crate deps
+# come down on the first cargo build.
 desktop-setup:
+	@if ! command -v cargo >/dev/null 2>&1; then \
+		echo "==> Rust (cargo) not found, installing via rustup..."; \
+		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; \
+		. "$$HOME/.cargo/env"; \
+	fi
+	@if ! command -v cmake >/dev/null 2>&1; then \
+		echo "==> cmake not found, installing via Homebrew..."; \
+		if ! command -v brew >/dev/null 2>&1; then \
+			echo "Error: Homebrew is required to install cmake but was not found."; \
+			echo "Install it from https://brew.sh, then re-run make desktop-setup."; \
+			exit 1; \
+		fi; \
+		brew install cmake; \
+	fi
 	cd $(DESKTOP) && pnpm install
+	@echo ""
+	@echo "==> desktop-setup done. If this was the first install of Rust in this"
+	@echo "    shell, restart your terminal (or run: . \"\$$HOME/.cargo/env\") before"
+	@echo "    running make desktop-dev."
 
+desktop-dev: export MACOSX_DEPLOYMENT_TARGET ?= 14.0
 desktop-dev: desktop-setup
 	cd $(DESKTOP) && pnpm tauri dev
 
@@ -79,6 +106,17 @@ desktop-build: desktop-setup
 
 desktop-test:
 	cd $(DESKTOP)/src-tauri && cargo test
+
+# Builds the .dmg and copies it to desktop/dist-release/MeetingTranscriber-<version>.dmg
+# so it can be handed to someone else directly.
+desktop-release: desktop-setup
+	cd $(DESKTOP) && ./scripts/build-release.sh
+
+# Builds and installs straight to /Applications on this Mac, replacing
+# whatever version is already there. Handy for trying a build without
+# leaving the terminal.
+desktop-install: desktop-release
+	cd $(DESKTOP) && ./scripts/install.sh "$$(ls -t dist-release/*.dmg | head -n1)"
 
 # Prove the Rust chunk decode/split is faithful to the Python app's: same
 # boundaries and same sample checksums on the same file, or the A/B transcript

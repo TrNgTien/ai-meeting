@@ -9,9 +9,9 @@
 
 use std::path::PathBuf;
 
-use ai_meeting_lib::chunking::decode::{audio_duration, decode_range};
-use ai_meeting_lib::chunking::split::find_split_index;
-use ai_meeting_lib::SAMPLE_RATE;
+use transcriber_lib::chunking::decode::{audio_duration, decode_range};
+use transcriber_lib::chunking::split::find_split_index;
+use transcriber_lib::SAMPLE_RATE;
 
 const CHUNK_SECONDS: f64 = 300.0;
 const SPLIT_SEARCH_SECONDS: f64 = 20.0;

@@ -440,7 +440,7 @@ class ScreenCaptureKitCapture(SystemCapture):
         stream = SCK.SCStream.alloc().initWithFilter_configuration_delegate_(
             content_filter, config, delegate
         )
-        queue = libdispatch.dispatch_queue_create(b"meeting-transcriber.audio", None)
+        queue = libdispatch.dispatch_queue_create(b"transcriber.audio", None)
 
         ok, err = stream.addStreamOutput_type_sampleHandlerQueue_error_(
             delegate, SCK.SCStreamOutputTypeAudio, queue, None

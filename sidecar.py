@@ -167,6 +167,9 @@ class Sidecar:
                 )
                 emit("hide_progress")
                 return "phowhisper-large:vi", self._final_transcriber.transcribe_audio
+            except DownloadCancelled:
+                emit("hide_progress")
+                raise TranscriptionCancelled("model download was cancelled")
             except Exception as exc:
                 emit("hide_progress")
                 emit(
@@ -174,6 +177,9 @@ class Sidecar:
                     message=f"PhoWhisper failed ({exc}); falling back to "
                     f"{self._transcriber.final_model_name}…",
                 )
+
+        if self._cancel_event.is_set():
+            raise TranscriptionCancelled("cancelled before model was ready")
 
         final_model_name = self._transcriber.final_model_name
 
@@ -186,17 +192,31 @@ class Sidecar:
                         "download_progress", model=m, downloaded=d, total=t
                     ),
                     status_cb=lambda msg: emit("status", message=msg),
+                    cancel_event=self._cancel_event,
                 )
                 emit("hide_progress")
                 return engine.engine_key, engine.transcribe_audio
+            except DownloadCancelled:
+                emit("hide_progress")
+                raise TranscriptionCancelled("model download was cancelled")
             except Exception as exc:
                 emit("hide_progress")
                 emit("status", message=f"MLX unavailable ({exc}); using the CPU engine…")
 
+        if self._cancel_event.is_set():
+            raise TranscriptionCancelled("cancelled before model was ready")
+
         emit("status", message=f"Loading model '{final_model_name}' (downloads on first use)…")
-        self._transcriber.preload_final_model(
-            progress_cb=lambda m, d, t: emit("download_progress", model=m, downloaded=d, total=t)
-        )
+        try:
+            self._transcriber.preload_final_model(
+                progress_cb=lambda m, d, t: emit(
+                    "download_progress", model=m, downloaded=d, total=t
+                ),
+                cancel_event=self._cancel_event,
+            )
+        except DownloadCancelled:
+            emit("hide_progress")
+            raise TranscriptionCancelled("model download was cancelled")
         emit("hide_progress")
         language = self._transcriber.language or "auto"
         return f"whisper-{final_model_name}:{language}", self._transcriber.transcribe_audio
@@ -222,31 +242,38 @@ class Sidecar:
             total = len(audio_paths)
             cancelled = False
             batch_started = time.monotonic()
-            for idx, source in enumerate(audio_paths, start=1):
-                counter = f" {idx}/{total}" if total > 1 else ""
-                label = f"Transcribing{counter}: {source.name}"
-                emit("status", message=f"{label}…")
-                emit("file_start", name=source.name)
-                try:
-                    written = self._run_final_transcription(
-                        source, label, lang_mode, model_name, use_mlx
-                    )
-                except TranscriptionCancelled:
-                    cancelled = True
-                    break
-                except Exception as exc:
-                    emit("error", file=source.name, message=str(exc))
-                    continue
-                saved.append(str(written))
-            emit(
-                "batch_done",
-                id=job_id,
-                count=len(saved),
-                saved=saved,
-                cancelled=cancelled,
-                elapsed_sec=time.monotonic() - batch_started,
-            )
-            self._current_job_id = None
+            try:
+                for idx, source in enumerate(audio_paths, start=1):
+                    counter = f" {idx}/{total}" if total > 1 else ""
+                    label = f"Transcribing{counter}: {source.name}"
+                    emit("status", message=f"{label}…")
+                    emit("file_start", name=source.name)
+                    try:
+                        written = self._run_final_transcription(
+                            source, label, lang_mode, model_name, use_mlx
+                        )
+                    except TranscriptionCancelled:
+                        cancelled = True
+                        break
+                    except Exception as exc:
+                        emit("error", file=source.name, message=str(exc))
+                        continue
+                    saved.append(str(written))
+            finally:
+                # batch_done must fire and _current_job_id must clear no
+                # matter what — otherwise the frontend's running state gets
+                # stuck forever and every subsequent job is rejected with
+                # "already running", with no way to recover short of an app
+                # restart.
+                emit(
+                    "batch_done",
+                    id=job_id,
+                    count=len(saved),
+                    saved=saved,
+                    cancelled=cancelled,
+                    elapsed_sec=time.monotonic() - batch_started,
+                )
+                self._current_job_id = None
 
         threading.Thread(target=worker, daemon=True).start()
 

@@ -11,6 +11,18 @@ function isAudioPath(path: string): boolean {
   return ext !== undefined && AUDIO_EXTS.includes(ext);
 }
 
+/** The native picker half of ImportZone, shared with call sites (e.g. the
+ * "Import more files" button on a finished/stopped transcript) that want the
+ * dialog without the full drag-and-drop dropzone UI. */
+export async function pickAudioFiles(): Promise<string[]> {
+  const selection = await open({
+    multiple: true,
+    filters: [{ name: "Audio", extensions: AUDIO_EXTS }],
+  });
+  if (selection === null) return [];
+  return Array.isArray(selection) ? selection : [selection];
+}
+
 /** A drag-and-drop target backed by Tauri's window-level file drop event
  * (real file paths, not browser File objects — this isn't a web
  * <input type="file"> drop), plus a native picker as the alternative to
@@ -48,12 +60,7 @@ export default function ImportZone({
   }, [onImport]);
 
   async function handleChoose() {
-    const selection = await open({
-      multiple: true,
-      filters: [{ name: "Audio", extensions: AUDIO_EXTS }],
-    });
-    if (selection === null) return;
-    const paths = Array.isArray(selection) ? selection : [selection];
+    const paths = await pickAudioFiles();
     if (paths.length > 0) onImport(paths);
   }
 

@@ -1,4 +1,4 @@
-"""Meeting Transcriber desktop app."""
+"""Transcriber desktop app."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ from transcriber import (
     segments_to_text,
 )
 
-APP_TITLE = "Meeting Transcriber"
+APP_TITLE = "Transcriber"
 POLL_MS = 200
 IMPORT_FILETYPES = [
     ("Audio files", "*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.opus *.wma *.mp4"),
@@ -155,7 +155,7 @@ def reveal_in_file_manager(paths: list[Path]) -> None:
         subprocess.run(["xdg-open", folders[0]], check=False)
 
 
-class MeetingTranscriberApp(ctk.CTk):
+class TranscriberApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
 
@@ -1729,7 +1729,7 @@ class MeetingTranscriberApp(ctk.CTk):
 
 
 def main() -> None:
-    app = MeetingTranscriberApp()
+    app = TranscriberApp()
     app.mainloop()
 
 

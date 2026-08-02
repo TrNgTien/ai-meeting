@@ -1,4 +1,4 @@
-# Meeting Transcriber
+# Transcriber
 
 Desktop app that turns recorded meeting audio into timestamped, Vietnamese-first transcripts. Everything runs locally — no audio ever leaves your machine.
 
@@ -230,7 +230,7 @@ If your Python lives somewhere unusual: `PYTHON_BIN=/path/to/python3.10 make set
 
 Notes for anyone modifying this:
 
-- Engine routing lives in `MeetingTranscriberApp._apply_language_selection()` and `_prepare_engine()` in `app.py`; `_prepare_engine()` returns `(engine_key, transcribe_audio)` and `chunking.transcribe_chunked()` drives the loop.
+- Engine routing lives in `TranscriberApp._apply_language_selection()` and `_prepare_engine()` in `app.py`; `_prepare_engine()` returns `(engine_key, transcribe_audio)` and `chunking.transcribe_chunked()` drives the loop.
 - `engine_key` goes into the checkpoint fingerprint alongside the audio file's size + mtime and the chunk size — mismatches invalidate the checkpoint instead of resuming into it.
 - Both engines expose `transcribe_audio(audio, offset_sec, on_segment=None)` taking a 16 kHz mono float32 array; `offset_sec` puts the chunk's timestamps back on the recording's timeline.
 - Chunk decoding goes through `chunking.decode_range()` (ffmpeg `-ss`/`-t`), which keeps memory flat on long files and bypasses the float64 blow-up in `_load_audio_16k()`'s resampler.

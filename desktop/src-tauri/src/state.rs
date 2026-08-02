@@ -1,6 +1,6 @@
 //! What the app is doing, and the handles a command needs to change it.
 //!
-//! Port of `app.AppState` plus the parts of `MeetingTranscriberApp` that were
+//! Port of `app.AppState` plus the parts of `TranscriberApp` that were
 //! really shared mutable state rather than UI.
 
 use std::sync::atomic::{AtomicBool, Ordering};

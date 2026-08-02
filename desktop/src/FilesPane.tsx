@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { RevealIcon, TrashIcon } from "./icons";
 
 interface SavedFile {
   path: string;
@@ -46,6 +48,15 @@ export default function FilesPane() {
     };
   }, []);
 
+  async function handleDelete(path: string) {
+    try {
+      await invoke("delete_transcript", { path });
+      setFiles((prev) => prev.filter((f) => f.path !== path));
+    } catch (err) {
+      console.error("failed to delete transcript", err);
+    }
+  }
+
   if (files.length === 0) {
     return <p className="muted files-empty">No transcripts yet — import a file to get started.</p>;
   }
@@ -58,7 +69,24 @@ export default function FilesPane() {
             <div className="file-name">{file.name}</div>
             <div className="file-path">{dirname(file.path)}</div>
           </div>
-          <button onClick={() => revealItemInDir(file.path)}>Reveal in Finder</button>
+          <div className="file-actions">
+            <button
+              className="icon-btn"
+              onClick={() => revealItemInDir(file.path)}
+              title="Reveal in Finder"
+              aria-label="Reveal in Finder"
+            >
+              <RevealIcon />
+            </button>
+            <button
+              className="icon-btn icon-btn-danger"
+              onClick={() => handleDelete(file.path)}
+              title="Delete transcript"
+              aria-label="Delete transcript"
+            >
+              <TrashIcon />
+            </button>
+          </div>
         </div>
       ))}
     </div>

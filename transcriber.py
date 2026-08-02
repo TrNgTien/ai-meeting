@@ -433,8 +433,9 @@ class Transcriber:
     def preload_final_model(
         self,
         progress_cb: Optional[ProgressCallback] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> None:
-        ensure_model_downloaded(self.final_model_name, progress_cb)
+        ensure_model_downloaded(self.final_model_name, progress_cb, cancel_event=cancel_event)
         self._get_final_model()
 
     def transcribe_file(self, wav_path: Path) -> list[TranscriptSegment]:
