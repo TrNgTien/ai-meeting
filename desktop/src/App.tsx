@@ -102,7 +102,11 @@ export default function App() {
               state) while another tab is showing, instead of losing
               state/events on every tab switch. */}
           <div className={tab === "transcript" ? "tab-panel" : "tab-panel hidden"}>
-            <TranscriptPane running={jobId !== null} onJobDone={handleJobDone} />
+            <TranscriptPane
+              running={jobId !== null}
+              onImport={handleImport}
+              onJobDone={handleJobDone}
+            />
           </div>
           <div className={tab === "files" ? "tab-panel" : "tab-panel hidden"}>
             <FilesPane />

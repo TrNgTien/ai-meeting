@@ -454,6 +454,8 @@ button:disabled {
   align-items: center;
   gap: 0.5rem;
   padding: 2.5rem 1.5rem;
+  width: 100%;
+  max-width: 360px;
   border: 2px dashed hsl(var(--border));
   border-radius: calc(var(--radius) - 0.25rem);
   color: hsl(var(--muted-foreground));
