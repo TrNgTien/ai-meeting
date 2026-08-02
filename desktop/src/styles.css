@@ -308,3 +308,20 @@ button:disabled {
   width: 100%;
   accent-color: hsl(var(--primary));
 }
+
+.download-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.download-progress progress {
+  flex: 1;
+}
+
+.download-progress-label {
+  flex-shrink: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+  white-space: nowrap;
+}

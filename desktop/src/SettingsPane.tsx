@@ -14,6 +14,10 @@ interface DownloadProgress {
   total: number;
 }
 
+function formatGb(bytes: number): string {
+  return (bytes / 1_000_000_000).toFixed(1);
+}
+
 /** Engine controls (language/model/GPU) plus the model list — inline instead
  * of a modal, matching the reference design's single-panel-per-tab layout.
  * Mirrors sidecar.py's cmd_list_models/cmd_download_model/cmd_delete_model
@@ -80,10 +84,17 @@ export default function SettingsPane({
                 <td>{model.name}</td>
                 <td>
                   {inFlight ? (
-                    <progress
-                      value={inFlight.downloaded}
-                      max={inFlight.total || undefined}
-                    />
+                    <div className="download-progress">
+                      <progress
+                        value={inFlight.downloaded}
+                        max={inFlight.total || undefined}
+                      />
+                      <span className="download-progress-label">
+                        {formatGb(inFlight.downloaded)}/{formatGb(inFlight.total)} GB
+                        {inFlight.total > 0 &&
+                          ` (${Math.round((inFlight.downloaded / inFlight.total) * 100)}%)`}
+                      </span>
+                    </div>
                   ) : model.downloaded ? (
                     `${(model.size_bytes / 1_000_000).toFixed(0)} MB`
                   ) : (
