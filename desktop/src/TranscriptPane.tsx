@@ -6,8 +6,10 @@ import { listen } from "@tauri-apps/api/event";
  * chunk_text rather than accumulated.
  */
 export default function TranscriptPane({
+  running,
   onJobDone,
 }: {
+  running: boolean;
   onJobDone: () => void;
 }) {
   const [status, setStatus] = useState("");
@@ -75,7 +77,13 @@ export default function TranscriptPane({
       {disconnected && (
         <div className="banner-error">Backend disconnected — restart the app.</div>
       )}
-      <div className="status-line">{status}</div>
+      {running && (
+        <div className="running-banner">
+          <span className="running-dot" />
+          {status || "Starting…"}
+        </div>
+      )}
+      {!running && <div className="status-line">{status}</div>}
       <div ref={boxRef} className="transcript-box">
         {text
           .split("\n")

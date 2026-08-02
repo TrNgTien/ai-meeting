@@ -83,7 +83,7 @@ export default function App() {
         <div className="content-card">
           <h1 className="content-title">Meeting Transcriber</h1>
           {tab === "transcript" ? (
-            <TranscriptPane onJobDone={handleJobDone} />
+            <TranscriptPane running={jobId !== null} onJobDone={handleJobDone} />
           ) : (
             <SettingsPane engine={engine} onEngineChange={setEngine} />
           )}
