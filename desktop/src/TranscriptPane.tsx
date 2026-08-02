@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import BatchImportBar from "./BatchImportBar";
 
 /** Mirrors app.py's _handle_ui_event (app.py:1360-1477): status line, saved
  * text, and a dimmed live-preview line that's replaced wholesale by the next
@@ -8,11 +7,9 @@ import BatchImportBar from "./BatchImportBar";
  */
 export default function TranscriptPane({
   running,
-  onImport,
   onJobDone,
 }: {
   running: boolean;
-  onImport: (paths: string[]) => void;
   onJobDone: () => void;
 }) {
   const [status, setStatus] = useState("");
@@ -89,8 +86,10 @@ export default function TranscriptPane({
       {!running && <div className="status-line">{status}</div>}
       {!running && !text ? (
         <div className="transcript-empty">
-          <p className="muted">No transcript yet — import an audio file to get started.</p>
-          <BatchImportBar disabled={false} onImport={onImport} />
+          <p className="muted">
+            No transcript yet — use the upload icon in the sidebar to import an
+            audio file.
+          </p>
         </div>
       ) : (
         <div ref={boxRef} className="transcript-box">

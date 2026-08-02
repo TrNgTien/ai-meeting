@@ -1,16 +1,17 @@
 import { useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { EngineState } from "./EngineControls";
-import BatchImportBar from "./BatchImportBar";
 import TranscriptPane from "./TranscriptPane";
 import SettingsPane from "./SettingsPane";
 import FilesPane from "./FilesPane";
-import { StopIcon, GearIcon, DocIcon, FolderIcon } from "./icons";
+import ImportDialog from "./ImportDialog";
+import { UploadIcon, StopIcon, GearIcon, DocIcon, FolderIcon } from "./icons";
 
 type Tab = "transcript" | "files" | "settings";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("transcript");
+  const [importing, setImporting] = useState(false);
   const [engine, setEngine] = useState<EngineState>({
     langMode: "vi+en",
     model: "small",
@@ -45,7 +46,14 @@ export default function App() {
     <div className="app-shell">
       <aside className="icon-rail">
         {jobId === null ? (
-          <BatchImportBar disabled={false} iconOnly onImport={handleImport} />
+          <button
+            className="rail-btn primary"
+            onClick={() => setImporting(true)}
+            title="Import files…"
+            aria-label="Import files"
+          >
+            <UploadIcon />
+          </button>
         ) : (
           <button
             className="rail-btn primary recording"
@@ -94,11 +102,7 @@ export default function App() {
               state) while another tab is showing, instead of losing
               state/events on every tab switch. */}
           <div className={tab === "transcript" ? "tab-panel" : "tab-panel hidden"}>
-            <TranscriptPane
-              running={jobId !== null}
-              onImport={handleImport}
-              onJobDone={handleJobDone}
-            />
+            <TranscriptPane running={jobId !== null} onJobDone={handleJobDone} />
           </div>
           <div className={tab === "files" ? "tab-panel" : "tab-panel hidden"}>
             <FilesPane />
@@ -108,6 +112,9 @@ export default function App() {
           </div>
         </div>
       </div>
+      {importing && (
+        <ImportDialog onClose={() => setImporting(false)} onImport={handleImport} />
+      )}
     </div>
   );
 }
