@@ -11,7 +11,7 @@ A local-only desktop app that records a meeting and turns audio into timestamped
 | | Where | Status |
 | --- | --- | --- |
 | Python + CustomTkinter/Tk | repo root (`app.py` + 6 modules) | **Working.** The reference implementation; `make` runs it. |
-| Rust + Tauri 2 + React | `desktop/` | **In progress.** Core done and tested; no UI yet. See `desktop/README.md`. |
+| Rust + Tauri 2 + React | `desktop/` | **Usable.** Import + transcribe + model management, all native — no Python at runtime. No live recording UI, no `vi`/PhoWhisper mode. See `desktop/README.md`. |
 
 The Rust port is deliberately additive — every root-level `make` target still works unchanged, so the two can be compared on real audio while the port catches up. When changing shared *behaviour*, change both or say which one you changed.
 

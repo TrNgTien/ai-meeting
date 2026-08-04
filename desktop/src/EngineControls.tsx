@@ -1,79 +1,73 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import Dropdown, { DropdownOption } from "./components/Dropdown";
+import { ModelInfo, formatSize } from "./lib/models";
+import { SlidersIcon } from "./icons";
 
 export interface EngineState {
   langMode: string;
   model: string;
-  mlx: boolean;
 }
 
-interface ModelInfo {
-  name: string;
-  downloaded: boolean;
-  size_bytes: number;
-}
+const LANGUAGES: DropdownOption[] = [
+  { value: "vi+en", label: "vi+en", hint: "Vietnamese + English" },
+  { value: "en", label: "en", hint: "English" },
+  { value: "auto", label: "auto", hint: "Detect" },
+];
 
-/** Mirrors app.py's header controls (app.py:275-319): language/model
- * dropdowns and the GPU (MLX) switch, default vi+en / first known model / on.
+/** Language and model dropdowns.
+ *
+ * The model list is owned by `App` (one `useModels` subscription) and passed
+ * in, so every pane shows the same state and the list survives tab switches.
+ *
+ * The Python app's third control, a GPU (MLX) switch, is gone: whisper.cpp
+ * compiles Metal in and falls back to CPU inside the library, so there is no
+ * runtime choice left to offer. Its `vi` (PhoWhisper) language option is gone
+ * for the same kind of reason — see `state::LanguageMode`.
  */
 export default function EngineControls({
   value,
+  models,
   onChange,
+  onManageModels,
 }: {
   value: EngineState;
+  models: ModelInfo[];
   onChange: (next: EngineState) => void;
+  /** Omitted where a model list is already on screen (the Settings tab). */
+  onManageModels?: () => void;
 }) {
-  const [models, setModels] = useState<string[]>([]);
-
-  useEffect(() => {
-    invoke("list_models");
-    const unlisten = listen<Record<string, unknown>>("sidecar-event", (event) => {
-      const payload = event.payload;
-      if (payload.event === "models") {
-        setModels((payload.models as ModelInfo[]).map((m) => m.name));
-      }
-    });
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, []);
+  const modelOptions: DropdownOption[] = models.map((model) => ({
+    value: model.name,
+    label: model.name,
+    hint: model.downloaded ? formatSize(model.size_bytes) : "not downloaded",
+    status: model.downloaded ? "ready" : "missing",
+  }));
 
   return (
     <div className="engine-controls">
-      <label>
-        Language:
-        <select
+      <div className="control">
+        <span className="control-label">Language</span>
+        <Dropdown
+          label="Language"
           value={value.langMode}
-          onChange={(e) => onChange({ ...value, langMode: e.target.value })}
-        >
-          <option value="vi+en">vi+en</option>
-          <option value="vi">vi</option>
-          <option value="en">en</option>
-          <option value="auto">auto</option>
-        </select>
-      </label>
-      <label>
-        Model:
-        <select
-          value={value.model}
-          onChange={(e) => onChange({ ...value, model: e.target.value })}
-        >
-          {models.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        <input
-          type="checkbox"
-          checked={value.mlx}
-          onChange={(e) => onChange({ ...value, mlx: e.target.checked })}
+          options={LANGUAGES}
+          onChange={(langMode) => onChange({ ...value, langMode })}
         />
-        GPU (MLX)
-      </label>
+      </div>
+      <div className="control">
+        <span className="control-label">Model</span>
+        <Dropdown
+          label="Model"
+          value={value.model}
+          options={modelOptions}
+          placeholder={models.length ? "Select a model" : "Loading…"}
+          onChange={(model) => onChange({ ...value, model })}
+        />
+      </div>
+      {onManageModels && (
+        <button className="manage-models" onClick={onManageModels}>
+          <SlidersIcon /> Manage
+        </button>
+      )}
     </div>
   );
 }

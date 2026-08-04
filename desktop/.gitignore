@@ -2,6 +2,4 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
-src-tauri/sidecar-dist/
-src-tauri/sidecar-build/
 dist-release/

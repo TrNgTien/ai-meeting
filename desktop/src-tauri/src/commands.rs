@@ -1,19 +1,14 @@
-//! Tauri commands that drive `sidecar.py`. Each one writes a single JSON
-//! command line to the sidecar's stdin (via [`SidecarState::send`]) and
-//! returns immediately — the actual result arrives later as a
-//! `sidecar-event` the frontend correlates by `id` (jobs) or `name`
-//! (downloads). These are fire-and-forget sends, not request/response calls.
+//! The frontend's entry points into [`crate::engine`].
 //!
-//! Every payload shape here is copied from `sidecar.py`'s `cmd_*` methods
-//! directly, not from the design doc's illustrative examples, which predate
-//! the real implementation (e.g. the design doc's `mm_download_progress`/
-//! `done` events don't exist — the real ones are `mm_progress`/
-//! `mm_download_finished`/`batch_done`).
+//! Every command is fire-and-forget: it validates its arguments, hands the work
+//! to the engine host, and returns. Results arrive later as `engine-event`s the
+//! frontend correlates by `id` (jobs) or `name` (downloads) — the same contract
+//! the Python sidecar had, kept so the panes did not have to change when the
+//! sidecar went away.
 
-use serde_json::json;
-use tauri::State;
+use tauri::{AppHandle, State};
 
-use crate::sidecar::SidecarState;
+use crate::engine::EngineHost;
 
 /// Deletes a saved transcript file from disk. Scoped to `.txt` so the Files
 /// tab's inline delete button can't be pointed at arbitrary paths.
@@ -27,50 +22,42 @@ pub fn delete_transcript(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn list_models(state: State<SidecarState>) -> Result<(), String> {
-    state.send(json!({"cmd": "list_models"}))
+pub fn list_models(app: AppHandle, engine: State<EngineHost>) {
+    engine.list_models(&app);
 }
 
 #[tauri::command]
-pub fn download_model(state: State<SidecarState>, name: String) -> Result<(), String> {
-    state.send(json!({"cmd": "download_model", "name": name}))
+pub fn download_model(app: AppHandle, engine: State<EngineHost>, name: String) {
+    engine.download_model(&app, name);
 }
 
 #[tauri::command]
-pub fn delete_model(state: State<SidecarState>, name: String) -> Result<(), String> {
-    state.send(json!({"cmd": "delete_model", "name": name}))
+pub fn delete_model(app: AppHandle, engine: State<EngineHost>, name: String) {
+    engine.delete_model(&app, name);
 }
 
-/// Cancels an in-flight model download. `sidecar.py`'s `cmd_cancel` also
-/// handles cancelling a running transcription job (keyed by `id` instead of
-/// `name`) — that's [`cancel_job`], a separate Tauri command, so the two
-/// distinct cancellable things stay distinct at the call site rather than
-/// relying on the frontend to pass the right key in an untyped payload.
+/// Cancels an in-flight model download. Kept separate from [`cancel_job`] even
+/// though both trip a `CancelFlag`, so the two distinct cancellable things stay
+/// distinct at the call site rather than relying on the frontend to pass the
+/// right key in an untyped payload.
 #[tauri::command]
-pub fn cancel_download(state: State<SidecarState>, name: String) -> Result<(), String> {
-    state.send(json!({"cmd": "cancel", "name": name}))
+pub fn cancel_download(app: AppHandle, engine: State<EngineHost>, name: String) {
+    engine.cancel_download(&app, name);
 }
 
 #[tauri::command]
 pub fn start_transcription(
-    state: State<SidecarState>,
+    app: AppHandle,
+    engine: State<EngineHost>,
     id: String,
     paths: Vec<String>,
     lang_mode: String,
     model: String,
-    mlx: bool,
-) -> Result<(), String> {
-    state.send(json!({
-        "cmd": "start_transcription",
-        "id": id,
-        "paths": paths,
-        "lang_mode": lang_mode,
-        "model": model,
-        "mlx": mlx,
-    }))
+) {
+    engine.start_transcription(&app, id, paths, &lang_mode, model);
 }
 
 #[tauri::command]
-pub fn cancel_job(state: State<SidecarState>, id: String) -> Result<(), String> {
-    state.send(json!({"cmd": "cancel", "id": id}))
+pub fn cancel_job(app: AppHandle, engine: State<EngineHost>, id: String) {
+    engine.cancel_job(&app, id);
 }

@@ -50,6 +50,9 @@ whisper-rs = { version = "0.16" }
 
 [dev-dependencies]
 tempfile = "3"
+# `tauri::test`'s mock runtime, so the command layer can be driven — and its
+# events asserted on — without opening a window.
+tauri = { version = "2", features = ["test"] }
 
 [features]
 # Tauri's own default; nothing custom yet.

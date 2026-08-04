@@ -14,11 +14,17 @@ the **behaviour** is ported deliberately faithfully.
 | Model cache & downloader (`transcribe/models.rs`) | Done, tested. Resumable via HTTP Range. |
 | Two-track recording (`audio/`) | Done, tested. ScreenCaptureKit + loopback fallback. |
 | Transcript merge (`merge.rs`) | Done, tested. |
-| **Tauri commands / events / React UI** | **Not started.** The window opens but is a placeholder. |
-| **`vi` mode (PhoWhisper)** | **Not started.** Needs an HF-safetensors → GGML converter. |
+| Tauri commands / events / React UI | Done. Import, batch transcribe, live preview, stop, model manager, Files tab. |
+| **Live recording in the UI** | **Not started.** `audio/` works; nothing invokes it yet. |
+| **`vi` mode (PhoWhisper)** | **Dropped.** Needs an HF-safetensors → GGML converter; `vi+en` covers the same audio. |
 | **SQLite meeting store** | **Not started.** |
 
-102 tests, `cargo clippy` clean.
+**No Python at runtime.** The app used to drive a PyInstaller bundle of
+`sidecar.py` over a pipe; that is gone, and `engine.rs` does the same work in
+process. Nothing in `desktop/` reads the repo root's `.venv` any more — the root
+Python app is now only a reference implementation and the A/B harness.
+
+104 tests, `cargo clippy` clean.
 
 ## Commands
 
@@ -27,7 +33,7 @@ Run from the repo root:
 ```bash
 make desktop-setup              # pnpm install
 make desktop-test               # cargo test
-make desktop-dev                # pnpm tauri dev  (placeholder UI until the IPC layer lands)
+make desktop-dev                # pnpm tauri dev
 make desktop-parity FILE=data/x.mp3   # prove chunk decode/split matches the Python app
 ```
 

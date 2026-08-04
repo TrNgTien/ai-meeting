@@ -377,16 +377,24 @@ body {
 
 .engine-controls {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   flex-wrap: wrap;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
-.engine-controls label {
+.control {
   display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 14px;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.control-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
 }
 
 select {
@@ -396,6 +404,135 @@ select {
   border-radius: calc(var(--radius) - 0.35rem);
   padding: 0.35rem 0.5rem;
   font-size: 14px;
+}
+
+/* Dropdown (components/Dropdown.tsx) — a listbox rather than a native
+   <select>, so options can carry a state dot and a size. */
+.dropdown {
+  position: relative;
+}
+
+.dropdown-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  min-width: 180px;
+  padding: 0.45rem 0.65rem;
+  font-size: 14px;
+  font-family: inherit;
+  color: hsl(var(--foreground));
+  background: hsl(var(--panel));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 0.3rem);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.dropdown-trigger:hover {
+  border-color: hsl(var(--primary) / 0.5);
+}
+
+.dropdown-trigger:focus-visible,
+.dropdown-trigger.open {
+  outline: none;
+  border-color: hsl(var(--primary));
+  box-shadow: 0 0 0 3px hsl(var(--primary) / 0.2);
+}
+
+.dropdown-trigger .chevron {
+  color: hsl(var(--muted-foreground));
+  flex-shrink: 0;
+  transition: transform 0.15s ease;
+}
+
+.dropdown-trigger.open .chevron {
+  transform: rotate(180deg);
+}
+
+.dropdown-value {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdown-placeholder {
+  color: hsl(var(--muted-foreground));
+}
+
+.dropdown-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  min-width: 100%;
+  max-height: 280px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.3rem;
+  list-style: none;
+  background: hsl(var(--panel));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 0.25rem);
+  box-shadow: 0 12px 28px hsl(0 0% 0% / 0.22);
+}
+
+.dropdown-option {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: calc(var(--radius) - 0.45rem);
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dropdown-option.active {
+  background: hsl(var(--primary) / 0.14);
+}
+
+.dropdown-check {
+  display: inline-flex;
+  width: 14px;
+  flex-shrink: 0;
+  color: hsl(var(--primary));
+}
+
+.dropdown-label {
+  flex: 1;
+}
+
+.dropdown-hint {
+  padding-left: 1rem;
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+}
+
+.dropdown-empty {
+  padding: 0.5rem;
+  font-size: 13px;
+  color: hsl(var(--muted-foreground));
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+  margin-right: 0.15rem;
+}
+
+.dot.ready {
+  background: hsl(142 70% 45%);
+}
+
+.dot.missing {
+  background: hsl(var(--muted-foreground) / 0.6);
 }
 
 input[type="checkbox"] {
@@ -422,19 +559,131 @@ button:disabled {
   cursor: not-allowed;
 }
 
-.settings-pane table {
-  width: 100%;
-  border-collapse: collapse;
+/* Model list (components/ModelList.tsx) — rows, not a table, so the actions
+   column can hold a progress bar without the cells jumping width. */
+.model-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   font-size: 14px;
 }
 
-.settings-pane td {
-  padding: 0.5rem 0.25rem;
+.model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 0.25rem;
   border-bottom: 1px solid hsl(var(--border));
 }
 
-.settings-pane progress {
+.model-row:last-child {
+  border-bottom: none;
+}
+
+.model-row-main {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.model-name {
+  font-weight: 500;
+}
+
+.model-badge {
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: hsl(var(--primary) / 0.15);
+  color: hsl(var(--primary));
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.model-size {
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+}
+
+.model-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.model-empty {
+  padding: 0.75rem 0.25rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.icon-button:hover:not(:disabled) {
+  color: hsl(0 72% 55%);
+  border-color: hsl(0 72% 55% / 0.5);
+  opacity: 1;
+}
+
+.icon-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+button.primary {
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  border-color: hsl(var(--primary));
+}
+
+button.danger {
+  background: hsl(0 72% 50%);
+  color: hsl(0 0% 100%);
+  border-color: hsl(0 72% 50%);
+}
+
+.manage-models {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.75rem;
+  background: hsl(var(--panel));
+}
+
+.manage-models:hover:not(:disabled) {
+  border-color: hsl(var(--primary) / 0.5);
+  opacity: 1;
+}
+
+/* Manage-models dialog (ModelManagerDialog.tsx) — reuses .import-overlay. */
+.model-dialog {
+  background: hsl(var(--panel));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  padding: 1.25rem 1.5rem 1.5rem;
   width: 100%;
+  max-width: 560px;
+  max-height: 80vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.model-dialog-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+progress {
   accent-color: hsl(var(--primary));
 }
 
@@ -446,6 +695,12 @@ button:disabled {
 
 .download-progress progress {
   flex: 1;
+}
+
+/* The bar sits in a row with the Cancel button, so give it a fixed track
+   instead of letting the percentage label resize it every tick. */
+.model-row-actions .download-progress {
+  width: 260px;
 }
 
 .download-progress-label {

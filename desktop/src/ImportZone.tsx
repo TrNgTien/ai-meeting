@@ -3,7 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { UploadIcon } from "./icons";
 
-// Mirrors sidecar.py's AUDIO_EXTS / app.py's AUDIO_EXTS (app.py:56-58).
+// Mirrors engine.rs's AUDIO_EXTS / app.py's AUDIO_EXTS (app.py:56-58).
 const AUDIO_EXTS = ["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4"];
 
 function isAudioPath(path: string): boolean {

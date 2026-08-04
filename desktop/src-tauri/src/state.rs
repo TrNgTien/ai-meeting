@@ -24,35 +24,42 @@ pub enum Phase {
 /// `ViEn` is the default and the reason this app exists: decode as Vietnamese
 /// on a *multilingual* checkpoint, so English terms mixed into Vietnamese
 /// speech ("deploy cái service này") stay spelled in English instead of being
-/// Vietnamised. `Vi` switches to PhoWhisper, which is more accurate on pure
-/// Vietnamese but phoneticises English.
+/// Vietnamised.
+///
+/// The Python app had a fourth mode, pure `vi`, which swapped in PhoWhisper —
+/// more accurate on unmixed Vietnamese, but it phoneticises English and it is a
+/// Hugging Face safetensors checkpoint, which whisper.cpp cannot load. It is not
+/// offered here; `ViEn` covers the same audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LanguageMode {
     #[serde(rename = "vi+en")]
     ViEn,
-    Vi,
     En,
     Auto,
 }
 
 impl LanguageMode {
+    /// Parse the string the frontend sends. Anything unrecognised — including
+    /// the retired `vi` — falls back to the default rather than failing a job:
+    /// `vi+en` decodes as Vietnamese too, so an old setting still transcribes
+    /// Vietnamese audio correctly.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "en" => LanguageMode::En,
+            "auto" => LanguageMode::Auto,
+            _ => LanguageMode::ViEn,
+        }
+    }
+
     /// The language code handed to the decoder. `None` means "detect", which
     /// matches how `Transcriber.set_language` stored `auto`.
     pub fn whisper_language(self) -> Option<&'static str> {
         match self {
-            // Both Vietnamese modes decode *as* Vietnamese; they differ in
-            // which checkpoint does it.
-            LanguageMode::ViEn | LanguageMode::Vi => Some("vi"),
+            LanguageMode::ViEn => Some("vi"),
             LanguageMode::En => Some("en"),
             LanguageMode::Auto => None,
         }
-    }
-
-    /// Whether this mode routes to PhoWhisper rather than a multilingual
-    /// checkpoint. Only pure `vi` does.
-    pub fn uses_phowhisper(self) -> bool {
-        matches!(self, LanguageMode::Vi)
     }
 }
 

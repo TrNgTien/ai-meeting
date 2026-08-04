@@ -19,7 +19,7 @@ function dirname(path: string): string {
   return parts.join("/");
 }
 
-/** Every transcript batch_done carries the paths it wrote (sidecar.py's
+/** Every transcript batch_done carries the paths it wrote (engine.rs's
  * cmd_start_transcription worker). Accumulate them across the session, most
  * recent first, with a Reveal-in-Finder action per file — mirrors app.py's
  * reveal_button/_reveal_saved, but as a persistent list instead of a button
@@ -29,7 +29,7 @@ export default function FilesPane() {
   const [files, setFiles] = useState<SavedFile[]>([]);
 
   useEffect(() => {
-    const unlisten = listen<Record<string, unknown>>("sidecar-event", (event) => {
+    const unlisten = listen<Record<string, unknown>>("engine-event", (event) => {
       const payload = event.payload;
       if (payload.event === "batch_done") {
         const saved = (payload.saved as string[]) ?? [];

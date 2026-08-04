@@ -5,7 +5,7 @@
 //!
 //!     cargo run --release --example transcribe -- <audio> [model] [lang] [chunk_sec]
 //!
-//! `lang` is one of `vi+en` (default), `vi`, `en`, `auto`.
+//! `lang` is one of `vi+en` (default), `en`, `auto`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -52,12 +52,7 @@ impl ChunkObserver for Printing {
 }
 
 fn parse_language(value: &str) -> LanguageMode {
-    match value {
-        "vi" => LanguageMode::Vi,
-        "en" => LanguageMode::En,
-        "auto" => LanguageMode::Auto,
-        _ => LanguageMode::ViEn,
-    }
+    LanguageMode::parse(value)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -73,10 +68,6 @@ fn main() -> anyhow::Result<()> {
         .map(|value| value.parse())
         .transpose()?
         .unwrap_or(DEFAULT_CHUNK_SECONDS);
-
-    if language.uses_phowhisper() {
-        anyhow::bail!("`vi` mode needs the PhoWhisper engine, which is not wired up yet");
-    }
 
     if !is_model_downloaded(&model) {
         eprintln!("Downloading '{model}' (one-time)…");

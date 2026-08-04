@@ -66,6 +66,31 @@ export function RevealIcon() {
   );
 }
 
+export function ChevronIcon() {
+  return (
+    <svg {...common} width={14} height={14} className="chevron">
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
+export function CheckIcon() {
+  return (
+    <svg {...common} width={14} height={14}>
+      <path d="m5 13 4 4L19 7" />
+    </svg>
+  );
+}
+
+export function SlidersIcon() {
+  return (
+    <svg {...common} width={15} height={15}>
+      <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3" />
+      <path d="M1 14h6M9 8h6M17 16h6" />
+    </svg>
+  );
+}
+
 export function TrashIcon() {
   return (
     <svg {...common}>

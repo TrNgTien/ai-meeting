@@ -6,6 +6,9 @@ import { StopIcon, UploadIcon } from "./icons";
 /** Mirrors app.py's _handle_ui_event (app.py:1360-1477): status line, saved
  * text, and a dimmed live-preview line that's replaced wholesale by the next
  * chunk_text rather than accumulated.
+ *
+ * There is no "backend disconnected" state to handle: the engine runs in the
+ * app's own process, so if it is gone the window is gone with it.
  */
 export default function TranscriptPane({
   running,
@@ -21,7 +24,6 @@ export default function TranscriptPane({
   const [status, setStatus] = useState("");
   const [text, setText] = useState("");
   const [preview, setPreview] = useState("");
-  const [disconnected, setDisconnected] = useState(false);
   const [stopping, setStopping] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
 
@@ -41,7 +43,7 @@ export default function TranscriptPane({
   }, [running]);
 
   useEffect(() => {
-    const unlisten = listen<Record<string, unknown>>("sidecar-event", (event) => {
+    const unlisten = listen<Record<string, unknown>>("engine-event", (event) => {
       const payload = event.payload as { event: string } & Record<string, unknown>;
       switch (payload.event) {
         case "status":
@@ -87,10 +89,6 @@ export default function TranscriptPane({
           setText((prev) => `${prev}\n[error${file ? ` (${file})` : ""}: ${message}]`);
           break;
         }
-        case "_sidecar_exited":
-          setDisconnected(true);
-          onJobDone();
-          break;
       }
     });
     return () => {
@@ -104,9 +102,6 @@ export default function TranscriptPane({
 
   return (
     <div className="transcript-pane">
-      {disconnected && (
-        <div className="banner-error">Backend disconnected — restart the app.</div>
-      )}
       {running && (
         <div className="running-banner">
           <span className="running-dot" />
