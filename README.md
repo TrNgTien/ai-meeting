@@ -12,15 +12,18 @@ runtime — the `.app` is self-contained and portable.
 
 | Area | State |
 | --- | --- |
-| Chunked / resumable transcription (`src-tauri/src/chunking/`) | Done, tested. Crash-safe checkpoints survive kills and power loss. |
-| whisper.cpp engine + Metal (`src-tauri/src/transcribe/whisper_cpp.rs`) | Done. |
+| Chunked / resumable transcription (`src-tauri/src/chunking/`) | Done, tested. Crash-safe checkpoints survive kills and power loss; recovery truncates and redoes only the interrupted chunk. |
+| whisper.cpp engine + Metal (`src-tauri/src/transcribe/whisper_cpp.rs`) | Done. CPU build outside Apple silicon. |
 | Hallucination + silence control (`src-tauri/src/transcribe/hallucination.rs`) | Done, tested. |
-| Model cache & downloader (`src-tauri/src/transcribe/models.rs`) | Done, tested. Resumable via HTTP Range. |
+| Streaming preview + progress (`src-tauri/src/transcribe/whisper_cpp.rs`, `src/lib/progress.ts`) | Done. Segments appear as they decode, per-chunk progress with an ETA. |
+| Drag-and-drop import (`src/ImportZone.tsx`) | Done. Window-level drop of `mp3`/`wav`/`m4a`/`aac`/`flac`/`ogg`/`opus`/`wma`/`mp4`, or the native picker; several files at once, each transcribed and saved. |
+| Model cache, downloader & manager (`src-tauri/src/transcribe/models.rs`, `src/ModelManagerDialog.tsx`) | Done, tested. Resumable via HTTP Range; download/delete from the UI; importing with a missing model prompts to download it, then resumes the import automatically. |
 | Two-track recording (`src-tauri/src/audio/`) | Done, tested. ScreenCaptureKit + loopback fallback, wall-clock-aligned tracks. |
 | Transcript merge (`src-tauri/src/merge.rs`) | Done, tested. Interleaves `Me` / `Meeting` by timestamp. |
 | Recording in the UI (`src-tauri/src/recording.rs`, `src/RecordBar.tsx`) | Done. Record, meters, device picker, then transcribe both tracks and merge. |
+| Files tab (`src/FilesPane.tsx`) | Done. Session list of saved transcripts with Reveal in Finder and inline delete. |
 | Settings persistence (`src-tauri/src/settings.rs`) | Done. Language, model, recording sides and microphone survive a relaunch. |
-| Bundled ffmpeg/ffprobe (`scripts/build-ffmpeg.sh`) | Done. LGPL, audio-decode only, ~3 MB each. |
+| Bundled ffmpeg/ffprobe (`scripts/build-ffmpeg.sh`) | Done. LGPL, audio-decode only, ~3 MB each; a missing decoder is reported at launch, not on the first file. |
 | Headless CLI (`src-tauri/src/bin/transcribe.rs`) | Done. Same engine as the GUI, no window. |
 | **SQLite meeting store** | **Not started.** |
 
