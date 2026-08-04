@@ -56,7 +56,7 @@ tarball="$work_dir/ffmpeg-$FFMPEG_VERSION.tar.xz"
 source_dir="$work_dir/ffmpeg-$FFMPEG_VERSION"
 
 if [ ! -f "$tarball" ]; then
-  echo "Downloading ffmpeg $FFMPEG_VERSION…"
+  echo "Downloading ffmpeg $FFMPEG_VERSION..."
   curl -fL --retry 3 -o "$tarball.part" \
     "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"
   mv "$tarball.part" "$tarball"
