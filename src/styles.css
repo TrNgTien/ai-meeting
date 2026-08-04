@@ -1,0 +1,977 @@
+/* Layout/visual language follows the reference mockup for
+   Zackriya-Solutions/meetily: a slim left icon rail, a floating pill tab
+   switcher, and a plain white content panel with timestamped transcript
+   rows. Adapted onto this app's actual feature set (file-import
+   transcription + engine/model settings — no recording/people/summary
+   tabs exist yet, so those aren't shown). */
+:root {
+  --background: 0 0% 100%;
+  --foreground: 0 0% 9%;
+  --panel: 0 0% 100%;
+  --rail: 220 14% 96%;
+  --pill-track: 220 14% 93%;
+  --primary: 217 91% 55%;
+  --primary-foreground: 0 0% 100%;
+  --muted-foreground: 220 9% 46%;
+  --border: 220 13% 89%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --radius: 0.75rem;
+
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  line-height: 1.5;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: 0 0% 11%;
+    --foreground: 0 0% 96%;
+    --panel: 0 0% 14%;
+    --rail: 0 0% 9%;
+    --pill-track: 0 0% 20%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 0 0% 9%;
+    --muted-foreground: 0 0% 63%;
+    --border: 0 0% 22%;
+    --destructive: 0 63% 55%;
+    --destructive-foreground: 0 0% 9%;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+.app-shell {
+  display: flex;
+  height: 100vh;
+}
+
+/* Left icon rail */
+.icon-rail {
+  width: 56px;
+  flex-shrink: 0;
+  background: hsl(var(--rail));
+  border-right: 1px solid hsl(var(--border));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem 0;
+}
+
+.rail-spacer {
+  flex: 1;
+}
+
+.rail-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+
+.rail-btn:hover:not(:disabled) {
+  background: hsl(var(--pill-track));
+}
+
+.rail-btn.primary {
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+}
+
+.rail-btn.primary:hover:not(:disabled) {
+  opacity: 0.9;
+  background: hsl(var(--primary));
+}
+
+.rail-btn.primary.recording {
+  background: hsl(var(--destructive));
+  color: hsl(var(--destructive-foreground));
+}
+
+.rail-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Main column */
+.app-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 1.5rem 2rem;
+  overflow: hidden;
+}
+
+.pill-nav {
+  display: inline-flex;
+  gap: 0.25rem;
+  background: hsl(var(--pill-track));
+  border-radius: 999px;
+  padding: 0.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: none;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  border-radius: 999px;
+  padding: 0.5rem 1rem;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.pill.active {
+  background: hsl(var(--panel));
+  color: hsl(var(--foreground));
+  box-shadow: 0 1px 3px hsl(0 0% 0% / 0.12);
+}
+
+.engine-bar {
+  background: hsl(var(--rail));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  width: 100%;
+  max-width: 720px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+  flex-shrink: 0;
+}
+
+.content-card {
+  background: hsl(var(--panel));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  width: 100%;
+  max-width: 720px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 1.5rem 2rem;
+  overflow: hidden;
+}
+
+.content-title {
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+  margin: 0 0 1rem;
+}
+
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+}
+
+.tab-panel.hidden {
+  display: none;
+}
+
+/* Transcript */
+.transcript-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.status-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+  min-height: 1.2em;
+  margin-bottom: 0.5rem;
+}
+
+.import-more-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.import-more-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.running-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: hsl(var(--primary) / 0.12);
+  color: hsl(var(--foreground));
+  border-radius: calc(var(--radius) - 0.35rem);
+  padding: 0.5rem 0.75rem;
+  font-size: 13px;
+  margin-bottom: 0.75rem;
+}
+
+/* Status, progress and bar share the middle column so the Stop button keeps
+   its place as lines appear and disappear. */
+.running-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.running-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.running-progress {
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+  font-variant-numeric: tabular-nums;
+}
+
+.running-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: hsl(var(--pill-track));
+  overflow: hidden;
+}
+
+.running-bar-fill {
+  height: 100%;
+  background: hsl(var(--primary));
+  border-radius: 999px;
+  /* Chunks land every few minutes; easing the jump reads as progress rather
+     than as the bar glitching. */
+  transition: width 400ms ease-out;
+}
+
+.running-stop-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+  background: hsl(var(--destructive) / 0.15);
+  color: hsl(var(--destructive));
+  border: none;
+  border-radius: calc(var(--radius) - 0.35rem);
+  padding: 0.3rem 0.6rem;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.running-stop-btn:hover {
+  background: hsl(var(--destructive) / 0.25);
+}
+
+.running-stop-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.running-stop-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.running-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: hsl(var(--primary));
+  flex-shrink: 0;
+  animation: running-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes running-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.transcript-box {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.transcript-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  text-align: center;
+}
+
+.transcript-empty .muted {
+  max-width: 32ch;
+}
+
+.transcript-row {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.5rem 0;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.transcript-row.plain {
+  color: hsl(var(--muted-foreground));
+  font-weight: 600;
+}
+
+.transcript-row.preview {
+  opacity: 0.55;
+}
+
+.transcript-timestamp {
+  flex-shrink: 0;
+  width: 4.75rem;
+  text-align: right;
+  color: hsl(var(--muted-foreground));
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.transcript-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.banner-error {
+  background: hsl(var(--destructive));
+  color: hsl(var(--destructive-foreground));
+  padding: 0.5rem 0.75rem;
+  border-radius: calc(var(--radius) - 0.25rem);
+  margin-bottom: 0.5rem;
+  font-size: 14px;
+}
+
+/* Settings */
+.settings-pane {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.section-heading {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 1.5rem 0 0.5rem;
+}
+
+.engine-controls {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.control {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.control-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+}
+
+select {
+  background: hsl(var(--pill-track));
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 0.35rem);
+  padding: 0.35rem 0.5rem;
+  font-size: 14px;
+}
+
+/* Dropdown (components/Dropdown.tsx) — a listbox rather than a native
+   <select>, so options can carry a state dot and a size. */
+.dropdown {
+  position: relative;
+}
+
+.dropdown-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  min-width: 180px;
+  padding: 0.45rem 0.65rem;
+  font-size: 14px;
+  font-family: inherit;
+  color: hsl(var(--foreground));
+  background: hsl(var(--panel));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 0.3rem);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.dropdown-trigger:hover {
+  border-color: hsl(var(--primary) / 0.5);
+}
+
+.dropdown-trigger:focus-visible,
+.dropdown-trigger.open {
+  outline: none;
+  border-color: hsl(var(--primary));
+  box-shadow: 0 0 0 3px hsl(var(--primary) / 0.2);
+}
+
+.dropdown-trigger .chevron {
+  color: hsl(var(--muted-foreground));
+  flex-shrink: 0;
+  transition: transform 0.15s ease;
+}
+
+.dropdown-trigger.open .chevron {
+  transform: rotate(180deg);
+}
+
+.dropdown-value {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdown-placeholder {
+  color: hsl(var(--muted-foreground));
+}
+
+.dropdown-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  min-width: 100%;
+  max-height: 280px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.3rem;
+  list-style: none;
+  background: hsl(var(--panel));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 0.25rem);
+  box-shadow: 0 12px 28px hsl(0 0% 0% / 0.22);
+}
+
+.dropdown-option {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: calc(var(--radius) - 0.45rem);
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dropdown-option.active {
+  background: hsl(var(--primary) / 0.14);
+}
+
+.dropdown-check {
+  display: inline-flex;
+  width: 14px;
+  flex-shrink: 0;
+  color: hsl(var(--primary));
+}
+
+.dropdown-label {
+  flex: 1;
+}
+
+.dropdown-hint {
+  padding-left: 1rem;
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+}
+
+.dropdown-empty {
+  padding: 0.5rem;
+  font-size: 13px;
+  color: hsl(var(--muted-foreground));
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+  margin-right: 0.15rem;
+}
+
+.dot.ready {
+  background: hsl(142 70% 45%);
+}
+
+.dot.missing {
+  background: hsl(var(--muted-foreground) / 0.6);
+}
+
+input[type="checkbox"] {
+  accent-color: hsl(var(--primary));
+}
+
+button {
+  background: hsl(var(--pill-track));
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 0.35rem);
+  padding: 0.4rem 0.8rem;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Model list (components/ModelList.tsx) — rows, not a table, so the actions
+   column can hold a progress bar without the cells jumping width. */
+.model-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 14px;
+}
+
+.model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 0.25rem;
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.model-row:last-child {
+  border-bottom: none;
+}
+
+.model-row-main {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.model-name {
+  font-weight: 500;
+}
+
+.model-badge {
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: hsl(var(--primary) / 0.15);
+  color: hsl(var(--primary));
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.model-size {
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+}
+
+.model-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.model-empty {
+  padding: 0.75rem 0.25rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.icon-button:hover:not(:disabled) {
+  color: hsl(0 72% 55%);
+  border-color: hsl(0 72% 55% / 0.5);
+  opacity: 1;
+}
+
+.icon-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+button.primary {
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  border-color: hsl(var(--primary));
+}
+
+button.danger {
+  background: hsl(0 72% 50%);
+  color: hsl(0 0% 100%);
+  border-color: hsl(0 72% 50%);
+}
+
+.manage-models {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.75rem;
+  background: hsl(var(--panel));
+}
+
+.manage-models:hover:not(:disabled) {
+  border-color: hsl(var(--primary) / 0.5);
+  opacity: 1;
+}
+
+/* Manage-models dialog (ModelManagerDialog.tsx) — reuses .import-overlay. */
+.model-dialog {
+  background: hsl(var(--panel));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  padding: 1.25rem 1.5rem 1.5rem;
+  width: 100%;
+  max-width: 560px;
+  max-height: 80vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.model-dialog-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+progress {
+  accent-color: hsl(var(--primary));
+}
+
+.download-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.download-progress progress {
+  flex: 1;
+}
+
+/* The bar sits in a row with the Cancel button, so give it a fixed track
+   instead of letting the percentage label resize it every tick. */
+.model-row-actions .download-progress {
+  width: 260px;
+}
+
+.download-progress-label {
+  flex-shrink: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* Files */
+.files-pane {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.files-empty {
+  margin: 0;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.file-info {
+  min-width: 0;
+}
+
+.file-name {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.file-path {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  border: 1px solid transparent;
+  color: hsl(var(--muted-foreground));
+}
+
+.icon-btn:hover:not(:disabled) {
+  opacity: 1;
+  color: hsl(var(--foreground));
+  background: hsl(var(--border));
+}
+
+.icon-btn-danger:hover {
+  color: hsl(0 84% 60%);
+}
+
+/* Import dialog */
+.import-overlay {
+  position: fixed;
+  inset: 0;
+  background: hsl(0 0% 0% / 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.import-dialog {
+  background: hsl(var(--panel));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.import-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 2.5rem 1.5rem;
+  width: 100%;
+  max-width: 360px;
+  border: 2px dashed hsl(var(--border));
+  border-radius: calc(var(--radius) - 0.25rem);
+  color: hsl(var(--muted-foreground));
+  text-align: center;
+}
+
+.import-dropzone.active {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.08);
+  color: hsl(var(--foreground));
+}
+
+.import-dropzone p {
+  margin: 0;
+}
+
+.import-close {
+  align-self: center;
+}
+
+.import-primary {
+  align-self: center;
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  border-color: hsl(var(--primary));
+}
+
+.import-primary:hover:not(:disabled) {
+  opacity: 0.9;
+  background: hsl(var(--primary));
+}
+
+/* Record row (RecordBar.tsx) — app.py's _build_record_row. Sits under the
+   engine controls: recording a meeting uses the same language and model an
+   import does, so the two belong in one bar. */
+.record-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid hsl(var(--border));
+}
+
+.record-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.85rem;
+  background: hsl(var(--panel));
+  font-weight: 600;
+}
+
+.record-btn:hover:not(:disabled) {
+  border-color: hsl(var(--destructive) / 0.5);
+  opacity: 1;
+}
+
+.record-btn.recording {
+  background: hsl(var(--destructive));
+  border-color: hsl(var(--destructive));
+  color: hsl(var(--destructive-foreground));
+}
+
+.record-btn.recording:hover:not(:disabled) {
+  opacity: 0.9;
+  background: hsl(var(--destructive));
+}
+
+.record-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 13px;
+  color: hsl(var(--muted-foreground));
+}
+
+/* Wide enough that the digits don't shuffle the row every second. */
+.record-timer {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 15px;
+  color: hsl(var(--destructive));
+  min-width: 3.5rem;
+}
+
+.record-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.record-meter-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+}
+
+.record-meter-track {
+  width: 80px;
+  height: 6px;
+  border-radius: 999px;
+  background: hsl(var(--pill-track));
+  overflow: hidden;
+}
+
+.record-meter-fill {
+  height: 100%;
+  background: hsl(var(--primary));
+  border-radius: 999px;
+  /* Matches the 100 ms poll: the bar glides between readings instead of
+     stepping, without lagging far enough behind to misreport a peak. */
+  transition: width 100ms linear;
+}
+
+/* Shown when the bundled decoder cannot be run — the app can do nothing at all
+   in that state, so it says so before the first import rather than after. */
+.install-warning {
+  width: 100%;
+  max-width: 720px;
+  margin-bottom: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid hsl(var(--destructive) / 0.4);
+  border-radius: var(--radius);
+  background: hsl(var(--destructive) / 0.08);
+  color: hsl(var(--foreground));
+  font-size: 13px;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+.install-warning code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}

@@ -1,15 +1,19 @@
-.venv/
-recordings/
-__pycache__/
-*.pyc
-.DS_Store
-*.egg-info/
-.cache/
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+dist-release/
+
+# Built by scripts/build-ffmpeg.sh, bundled by tauri.conf.json's externalBin.
+# Build artefacts of someone else's source; rebuilt by `make setup`.
+src-tauri/binaries/
+.ffmpeg-build/
+
+# Transcripts and sample audio stay local by design.
 *.mp4
 *.txt
 *.mp3
 *.m4a
 *.transcript.partial.json
 *.transcript.partial.json.tmp
-!.data/*.mp3
-!requirements.txt
+.DS_Store

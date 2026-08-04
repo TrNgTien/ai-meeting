@@ -1,6 +1,0 @@
-# cargo's bundled LibreSSL fails the TLS handshake against some crates.io CDN
-# nodes when HTTP/2 multiplexing is on ("SSL_ERROR_SYSCALL"), which shows up as a
-# spurious "failed to download" for one crate while others succeed. Disabling
-# multiplexing costs a little parallelism and makes fetches reliable.
-[http]
-multiplexing = false
