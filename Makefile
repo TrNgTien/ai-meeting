@@ -1,59 +1,76 @@
-.PHONY: start setup build run-local run-docker-cli transcribe clean
+.PHONY: setup ffmpeg dev build test transcribe release install
 
-.DEFAULT_GOAL := start
+.DEFAULT_GOAL := dev
 
-IMAGE_NAME = meeting-transcriber
-VENV = .venv
-PY = $(VENV)/bin/python
-STAMP = $(VENV)/.deps-installed
+# The only command a new machine needs: `make`. Sets up whatever is missing
+# (Rust, cmake, pnpm deps, bundled ffmpeg), then launches the app.
+# Later runs skip straight to launching.
 
-# The only command a new machine needs: `make`.
-# Installs whatever is missing (system libs, virtualenv, Python deps) the first
-# time, then launches the app. Later runs skip straight to launching.
-start: $(STAMP)
-	$(PY) app.py
+# rustup installs to ~/.cargo/bin, which a shell only picks up after sourcing
+# ~/.cargo/env (or restarting). Prepending it here means every target below
+# sees `cargo` immediately after setup installs it, even though each recipe
+# runs in its own subshell.
+export PATH := $(HOME)/.cargo/bin:$(PATH)
 
-# Re-runs setup.sh whenever it or requirements.txt is newer than the stamp,
-# so changed dependencies are picked up without anyone remembering to re-setup.
-$(STAMP): requirements.txt setup.sh
-	./setup.sh
-	@touch $(STAMP)
-
-# Force a full setup pass (system deps, virtualenv, Python deps) without launching.
+# Installs whatever is missing: the Rust toolchain, cmake (whisper-rs-sys
+# needs it), the frontend dependencies, and the bundled ffmpeg binaries.
 setup:
-	./setup.sh
-	@touch $(STAMP)
+	@if ! command -v cargo >/dev/null 2>&1; then \
+		echo "==> Rust (cargo) not found, installing via rustup..."; \
+		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; \
+		. "$$HOME/.cargo/env"; \
+	fi
+	@if ! command -v cmake >/dev/null 2>&1; then \
+		echo "==> cmake not found, installing via Homebrew..."; \
+		if ! command -v brew >/dev/null 2>&1; then \
+			echo "Error: Homebrew is required to install cmake but was not found."; \
+			echo "Install it from https://brew.sh, then re-run make setup."; \
+			exit 1; \
+		fi; \
+		brew install cmake; \
+	fi
+	pnpm install
+	$(MAKE) ffmpeg
+	@echo ""
+	@echo "==> setup done. If this was the first install of Rust in this"
+	@echo "    shell, restart your terminal (or run: . \"\$$HOME/.cargo/env\")"
+	@echo "    before running make dev."
 
-# Launch the app, assuming setup already ran.
-run-local: $(STAMP)
-	$(PY) app.py
+# The ffmpeg and ffprobe the .app bundles, built from source because every
+# ready-made static macOS build is GPL (they link x264 to encode video, which
+# this app never does). Audio decoders only: LGPL v2.1, ~3 MB each, and about
+# ten minutes the first time. Skips itself once built.
+ffmpeg:
+	./scripts/build-ffmpeg.sh
 
-# Headless transcription without the GUI.
-# Usage: make transcribe FILE=meeting.m4a [LANG_MODE=vi]
+dev: setup
+	pnpm tauri dev
+
+build: setup
+	pnpm tauri build
+
+test:
+	cargo test --manifest-path src-tauri/Cargo.toml
+
+# Headless transcription, no window. There is no Python left in this repo —
+# this is the same engine the app uses.
+# Usage: make transcribe FILE=meeting.m4a [MODEL=large-v3] [LANG_MODE=vi+en]
 # (LANG_MODE, not LANG — make inherits LANG from the shell's locale settings.)
-transcribe: $(STAMP)
+transcribe:
 	@if [ -z "$(FILE)" ]; then \
-		echo "Error: You must provide a FILE to transcribe."; \
-		echo "Usage: make transcribe FILE=your_audio_file.mp3 [LANG_MODE=vi]"; \
+		echo "Usage: make transcribe FILE=your_audio_file.mp3 [MODEL=large-v3] [LANG_MODE=vi+en]"; \
 		exit 1; \
 	fi
-	$(PY) transcriber.py "$(FILE)" $(LANG_MODE)
+	cargo run --release --manifest-path src-tauri/Cargo.toml --bin transcribe -- \
+		"$(CURDIR)/$(FILE)" "$(or $(MODEL),large-v3)" "$(or $(LANG_MODE),vi+en)"
 
-# Build the Docker image
-build:
-	docker build -t $(IMAGE_NAME) .
+# Builds the .dmg and copies it to dist-release/Transcriber-<version>.dmg
+# so it can be handed to someone else directly.
+release: setup
+	./scripts/build-release.sh
 
-# Run the CLI transcriber headlessly via Docker on a specific file
-# Usage: make run-docker-cli FILE=viet-voice.mp3
-run-docker-cli:
-	@if [ -z "$(FILE)" ]; then \
-		echo "Error: You must provide a FILE to transcribe."; \
-		echo "Usage: make run-docker-cli FILE=your_audio_file.mp3"; \
-		exit 1; \
-	fi
-	docker run --rm -it \
-		-v "$$(pwd):/app/data" \
-		$(IMAGE_NAME) python transcriber.py "/app/data/$(FILE)"
-
-clean:
-	docker rmi $(IMAGE_NAME) || true
+# Builds and installs straight to /Applications on this Mac, replacing
+# whatever version is already there. Handy for trying a build without
+# leaving the terminal.
+install: release
+	./scripts/install.sh "$$(ls -t dist-release/*.dmg | head -n1)"

@@ -1,0 +1,14 @@
+# cargo's bundled LibreSSL fails the TLS handshake against some crates.io CDN
+# nodes when HTTP/2 multiplexing is on ("SSL_ERROR_SYSCALL"), which shows up as a
+# spurious "failed to download" for one crate while others succeed. Disabling
+# multiplexing costs a little parallelism and makes fetches reliable.
+[http]
+multiplexing = false
+
+# screencapturekit's Swift bridge (swift_bridge) links the Swift runtime as
+# `@rpath/libswift_Concurrency.dylib`, but rustc does not inherit the rpaths the
+# swiftc driver normally adds. Without Xcode installed the runtime lives in the
+# dyld shared cache under /usr/lib/swift; the absolute load commands resolve
+# from there, but @rpath needs this entry. Harmless with Xcode, required without.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]

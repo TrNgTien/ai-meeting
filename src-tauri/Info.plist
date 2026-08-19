@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Transcriber records your microphone to transcribe meetings.</string>
+	<!-- ScreenCaptureKit is how the meeting side is captured: the far end of a
+	     call arrives as playback, which no ordinary input device can reach. No
+	     video is recorded — the stream is configured for audio only. Without
+	     this key macOS denies the capture without ever asking the user. -->
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Transcriber captures the audio your computer plays so the other side of a meeting can be transcribed. No screen images are recorded or saved.</string>
+</dict>
+</plist>
