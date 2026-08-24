@@ -12,16 +12,16 @@ A local-only macOS desktop app that records a meeting and turns audio into times
 
 ```bash
 make                              # setup if needed, then launch the GUI (the one command)
-make setup                        # install missing toolchain/deps, pnpm install, build ffmpeg
+make setup                        # install missing toolchain/deps, pnpm install, build ffmpeg + llama-cli
 make dev                          # launch with hot reload
 make build                        # produce the .app/.dmg
-make test                         # cargo test (116 tests)
+make test                         # cargo test (137 tests)
 make transcribe FILE=meeting.m4a [MODEL=large-v3] [LANG_MODE=vi+en]   # headless CLI
 make release / make install       # .dmg to dist-release/ / install to /Applications
 ```
 
 - `LANG_MODE`, never `LANG` — make inherits `LANG` from the shell locale.
-- `make` re-runs `setup` whenever `package.json` or `pnpm-lock.yaml` is newer than `node_modules`. `setup` is idempotent; `make ffmpeg` skips itself once the binaries exist.
+- `make` re-runs `setup` whenever `package.json` or `pnpm-lock.yaml` is newer than `node_modules`. `setup` is idempotent; `make ffmpeg` and `make llama` each skip themselves once the binaries exist.
 - Verification is `make test` plus running the app or the CLI on a real audio file.
 
 ## Architecture
@@ -56,7 +56,7 @@ whisper-rs exposes a real segment callback, so unlike the Python app there is no
 
 ### Threading / UI
 
-`commands.rs` is the thin layer; `engine::EngineHost` (`engine.rs`) owns the worker-thread state behind an `Arc<Inner>`. Tauri owns an `AppState` (`state.rs`) with a `Phase` state machine (`Idle`/`Recording`/`Transcribing`) — import, model switching, and new recordings are rejected unless `Idle`. All progress reaches the frontend as one `engine-event` (JSON with an `event` discriminator); the React panes each filter the whole stream (`src/lib/` has the typed helpers). Never call `emit` from a worker without the `AppHandle` being held by the job (the recorder keeps its own, see below).
+`commands.rs` is the thin layer; `engine::EngineHost` (`engine.rs`) owns the worker-thread state behind an `Arc<Inner>`. Tauri owns an `AppState` (`state.rs`) with a `Phase` state machine (`Idle`/`Recording`/`Transcribing`/`Summarizing`) — import, model switching, and new recordings are rejected unless `Idle`. All progress reaches the frontend as one `engine-event` (JSON with an `event` discriminator); the React panes each filter the whole stream (`src/lib/` has the typed helpers). Never call `emit` from a worker without the `AppHandle` being held by the job (the recorder keeps its own, see below).
 
 ### Live recording
 
@@ -64,9 +64,13 @@ whisper-rs exposes a real segment callback, so unlike the Python app there is no
 
 The two streams have independent clocks, so `wav_writer.rs` pins each track to wall-clock time and pads/trims when drift exceeds 100 ms — that alignment is what makes the merge meaningful. After `stop_recording`, `engine::run_recording` transcribes both tracks *separately* (so your own voice bleeding from the speakers into the mic is not transcribed twice), then `merge::merge_transcript_files()` interleaves by timestamp into `<stem>-conversation.txt` with `Me` / `Meeting` labels. **A cancelled run skips the merge** — half a conversation reads worse than two transcripts.
 
+### Summarization (local LLM)
+
+`summarize/` turns a finished transcript into `<stem>-summary.md` with a bundled `llama-cli` running any instruct GGUF — the same privacy contract as whisper, nothing leaves the machine. The GGUF cache (`~/.cache/llama-gguf/`, catalog + a validated "any HF repo/file" custom pair) mirrors the whisper model cache and shares the downloader extracted into `download.rs`. The one implementation, `LlamaCliSummarizer` (`summarize/llama_cli.rs`), is a sidecar like ffmpeg: resolved by `chunking::decode::sidecar()` with a `TRANSCRIBER_LLAMA_DIR` override. `summarize/prompt.rs` does map-reduce when the transcript outgrows the context window (`--jinja` applies the GGUF's own chat template, which is what makes bring-your-own-model work). It runs as an ordinary job on the **same single job slot** as transcription — that serialisation is what stops whisper large-v3 and a Q8 GGUF being resident together. There is deliberately **no `loaded` cache slot**: the sidecar holds no in-process state, so per-summary model load is the cost. Auto-summarise after a recording's merge is gated on `summarize_after_recording` and runs inside `run_recording`'s already-held job.
+
 ### Settings
 
-`settings.rs` persists `{language_mode, model, record_mic, record_system, mic_device_id}` as JSON in `~/.config/dev.placepad.transcriber/settings.json`, loaded at startup to seed `AppState` and saved on every change. It is the single source of truth for the defaults — `DEFAULT_MODEL = "large-v3"` wins on first run, whatever the UI placeholder says.
+`settings.rs` persists `{language_mode, model, record_mic, record_system, mic_device_id, llm_model, llm_custom_repo, llm_custom_file, summarize_after_recording}` as JSON in `~/.config/dev.placepad.transcriber/settings.json`, loaded at startup to seed `AppState` and saved on every change. It is the single source of truth for the defaults — `DEFAULT_MODEL = "large-v3"` wins on first run, whatever the UI placeholder says. The LLM fields default to `DEFAULT_LLM` (gemma-3n E2B Q4_K_M) and auto-summarise off; `#[serde(default)]` keeps old settings files loading.
 
 ## Gotchas
 
@@ -74,6 +78,13 @@ The two streams have independent clocks, so `wav_writer.rs` pins each track to w
 - **`.cargo/config.toml` sets `http.multiplexing = false`.** Without it, cargo's LibreSSL intermittently fails the TLS handshake against some crates.io CDN nodes and reports a bogus "failed to download".
 - **`screencapturekit` is pinned to 2.1 on purpose.** 3.0+ depend on `apple-metal`, whose Swift bridge needs a newer Metal SDK than macOS 15 Command Line Tools ships.
 - **The bundled ffmpeg (7.1, built by `scripts/build-ffmpeg.sh`) is the one true decoder**, resolved in `decode.rs` sidecar-first with a `PATH` fallback and a `TRANSCRIBER_FFMPEG_DIR` override. It and a system ffmpeg (8.1) agree bit-for-bit on mp3, m4a, flac, wav and wma; opus differs by at most 1 LSB out of 32768 — rounding between versions, do not chase it in a diff.
+- **`scripts/build-llama.sh` needs `-DGGML_METAL_EMBED_LIBRARY=ON`.** Without it the bundled `llama-cli` looks for `ggml-metal.metal` next to the executable at runtime and silently falls back to CPU inside a `.app` bundle (10-20× slower). The build script verifies the embed by grepping the binary's strings for `#include <metal_stdlib>` — do it with `grep -c`, not `grep -q`, because `-q` closes the pipe early and under `set -o pipefail` the check falsely fails. Since v0.2.0 the `llama-cli` target is gated behind `LLAMA_BUILD_SERVER=ON` in `tools/CMakeLists.txt`; we build only the `llama-cli` target, never the server binary. The installed sidecar is resolved by `chunking::decode::sidecar("llama-cli", "TRANSCRIBER_LLAMA_DIR")` in `summarize/llama_cli.rs`.
+- **Never download the LLM from `google/gemma-3n-*`** — those repos are license-gated and 401 without a bearer token, which the `download.rs` downloader does not send; a 401 would surface as a confusing "download failed". Use the ungated GGUF mirrors (`unsloth/` and `ggml-org/`), as catalogued in `summarize/models.rs`.
+- **The summary prompt goes in a file, not argv.** A 60-minute transcript is >100 KB and blows past `E2BIG`. `LlamaCliSummarizer` writes the user turn to a temp file (`-f`) and passes only the short system prompt via `-sys`.
+- **`llama-cli` puts its banner, the echoed prompt and the timing line on *stdout* in v0.2.0**, not stderr — only model-load diagnostics (an OOM, a bad GGUF) go to stderr. `generate()` in `llama_cli.rs` therefore has to find the completion *behind* the echoed prompt (a `\n> ` + first-500-bytes block) in the raw stdout stream, and it captures stderr to attach to the error message on a non-zero exit — reading only stdout on a failed load yields an empty summary with no explanation.
+- **RAM.** Whisper large-v3 + a Q8 GGUF is ~8 GB of weights. The shared job slot serialises transcription and summarization — do not "optimize" by letting a summary run during a transcription.
+- **Vietnamese quality.** gemma-3n-E2B is a ~2B-effective model; its Vietnamese summarization is serviceable, not great. The custom-HF field is the escape hatch — Qwen3-4B-Instruct GGUF is a noticeably stronger Vietnamese alternative and is mentioned in `README.md`.
+- **Summarization output is not covered by the transcription checkpoint system** and does not touch `engine_key()` — no interaction with `chunking/checkpoint.rs` resume logic.
 - **Do not reorder the chunk durability steps** in `checkpoint.rs` (text → fsync → checkpoint with new size). The truncate-and-redo recovery in `resume_or_restart()` depends on that exact order.
 - **Changing what a decode produces (model, language, engine) must change `engine_key()`**, or a checkpoint written by the old config will be resumed by the new one and the two halves spliced.
 - Data lives in: `~/Documents/Transcriber/recordings/` (recordings + transcripts), `~/.cache/whisper-cpp/` (models), `~/.config/dev.placepad.transcriber/settings.json`. `~/.cache/whisper`, `~/.cache/ai-meeting` and the MLX HF snapshots are dead weight from the Python era — deletable by hand, never programmatically.

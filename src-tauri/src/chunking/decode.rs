@@ -20,18 +20,21 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::SAMPLE_RATE;
 
-/// Locate `ffmpeg` or `ffprobe`.
+/// Locate a bundled sidecar executable — `ffmpeg`/`ffprobe` here, `llama-cli`
+/// in [`crate::summarize::llama_cli`].
 ///
-/// The app bundles its own pair (see `scripts/build-ffmpeg.sh`), which Tauri
-/// installs next to the executable, so a user never has to install anything to
-/// transcribe a file. Falling back to the bare name keeps a plain `cargo run`
-/// and the parity harness working against whatever is on PATH, and keeps a
-/// bundle whose sidecar somehow did not ship from being dead in the water.
+/// The app bundles its own sidecars (see `scripts/build-ffmpeg.sh` and
+/// `scripts/build-llama.sh`), which Tauri installs next to the executable, so a
+/// user never has to install anything to transcribe a file or summarise one.
+/// Falling back to the bare name keeps a plain `cargo run` and the parity
+/// harness working against whatever is on PATH, and keeps a bundle whose
+/// sidecar somehow did not ship from being dead in the water.
 ///
-/// `TRANSCRIBER_FFMPEG_DIR` overrides both, which is how a test or a bisect
-/// points the app at a specific build.
-fn tool(name: &str) -> PathBuf {
-    if let Some(dir) = std::env::var_os("TRANSCRIBER_FFMPEG_DIR") {
+/// `env_dir_var` names the override variable — `TRANSCRIBER_FFMPEG_DIR` for the
+/// decoders, `TRANSCRIBER_LLAMA_DIR` for llama-cli — which is how a test or a
+/// bisect points the app at a specific build.
+pub fn sidecar(name: &str, env_dir_var: &str) -> PathBuf {
+    if let Some(dir) = std::env::var_os(env_dir_var) {
         let candidate = PathBuf::from(dir).join(name);
         if candidate.is_file() {
             return candidate;
@@ -45,6 +48,11 @@ fn tool(name: &str) -> PathBuf {
         return candidate;
     }
     PathBuf::from(name)
+}
+
+/// Locate `ffmpeg` or `ffprobe` (see [`sidecar`]).
+fn tool(name: &str) -> PathBuf {
+    sidecar(name, "TRANSCRIBER_FFMPEG_DIR")
 }
 
 /// Decode `[start_sec, start_sec + duration_sec)` as mono 16 kHz float32.

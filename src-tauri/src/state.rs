@@ -17,6 +17,7 @@ pub enum Phase {
     Idle,
     Recording,
     Transcribing,
+    Summarizing,
 }
 
 /// The language modes the UI offers, and the engine routing each implies.

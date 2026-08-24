@@ -24,16 +24,18 @@ runtime — the `.app` is self-contained and portable.
 | Files tab (`src/FilesPane.tsx`) | Done. Session list of saved transcripts with Reveal in Finder and inline delete. |
 | Settings persistence (`src-tauri/src/settings.rs`) | Done. Language, model, recording sides and microphone survive a relaunch. |
 | Bundled ffmpeg/ffprobe (`scripts/build-ffmpeg.sh`) | Done. LGPL, audio-decode only, ~3 MB each; a missing decoder is reported at launch, not on the first file. |
+| Bundled llama-cli (`scripts/build-llama.sh`) | Done. MIT, Metal with embedded shaders, for local-LLM summarization. |
+| Local-LLM summarization (`src-tauri/src/summarize/`, `src/SummaryPane.tsx`) | Done. A Summarize action on any transcript turns it into `<stem>-summary.md` with the bundled `llama-cli` running a GGUF — same privacy contract as whisper, nothing leaves the machine. Map-reduce over long transcripts, streamed to the Summary tab. |
 | Headless CLI (`src-tauri/src/bin/transcribe.rs`) | Done. Same engine as the GUI, no window. |
 | **SQLite meeting store** | **Not started.** |
 
-116 tests, `cargo clippy` clean.
+137 tests, `cargo clippy` clean.
 
 ## Commands
 
 ```bash
 make            # setup if needed, then launch the app (the one command)
-make setup      # install missing toolchain/deps, fetch pnpm packages, build ffmpeg
+make setup      # install missing toolchain/deps, fetch pnpm packages, build ffmpeg + llama-cli
 make dev        # launch with hot reload
 make build      # produce the .app/.dmg
 make test       # cargo test
@@ -60,9 +62,11 @@ permission and stores them with macOS.
 | What | Where |
 | --- | --- |
 | Recordings + transcripts | `~/Documents/Transcriber/recordings/` |
-| Downloaded models | `~/.cache/whisper-cpp/` |
+| Downloaded whisper models | `~/.cache/whisper-cpp/` |
+| Downloaded LLM GGUFs | `~/.cache/llama-gguf/` |
 | Settings | `~/.config/dev.placepad.transcriber/settings.json` |
 | Checkpoints (mid-run) | `<audio>.transcript.partial.json`, next to the audio, deleted on completion |
+| Summaries | `<transcript>-summary.md`, next to the transcript |
 
 If you used an older version of the app, `~/.cache/whisper` (openai-whisper
 weights), `~/.cache/ai-meeting` and the MLX Hugging Face snapshots in
@@ -93,6 +97,29 @@ links perfectly happily and would only fail on the user's first real file.
 `PATH`, so `cargo run` and the CLI work against a system ffmpeg.
 `TRANSCRIBER_FFMPEG_DIR` overrides both.
 
+### Local-LLM summarization
+
+Any finished transcript — an import or a recording's merged conversation — can
+be summarised by pressing the Summarize action, which runs a bundled `llama-cli`
+against a GGUF the app downloads on first use and caches in
+`~/.cache/llama-gguf/`. Nothing leaves the machine, matching the transcription
+contract. A long transcript is split on utterance boundaries, summarised per
+part, and the parts are folded into one `<transcript>-summary.md` (map-reduce);
+the Summary tab streams tokens as they are produced.
+
+The default model is **Gemma 3n E2B** (Q4_K_M, ~2.8 GB — a ~2B-effective
+MatFormer that is *serviceable* at Vietnamese, not great). Two selectable
+quantizations ship in the catalog, and a "custom Hugging Face repo + file" field
+lets you point it at any instruct GGUF you like. **Qwen3-4B-Instruct GGUF
+(`unsloth/Qwen3-4B-Instruct-2507-GGUF`) is a noticeably stronger Vietnamese
+alternative** — set it as the custom model, and the GGUF's own chat template is
+applied automatically, so no code needs to change. Use only *ungated* GGUFs;
+the app's downloader sends no auth token.
+
+`scripts/build-llama.sh` builds `llama-cli` during `make setup` and
+`tauri.conf.json` ships it as an `externalBin` sidecar, exactly like ffmpeg.
+`TRANSCRIBER_LLAMA_DIR` overrides the resolved binary.
+
 ## Things that will bite you
 
 - **`whisper-rs` leaks its segment callback.** It stores the closure with
@@ -115,12 +142,15 @@ links perfectly happily and would only fail on the user's first real file.
 
 ## Verifying a change
 
-`make test` (116 tests) covers chunking/checkpoint durability, hallucination
-filtering, the merge, and the recorder's track alignment. The end-to-end gates
+`make test` (137 tests) covers chunking/checkpoint durability, hallucination
+filtering, the merge, the recorder's track alignment, the downloader, and the
+summarizer's map-reduce. The end-to-end gates
 are real audio: `make transcribe FILE=<a recording>` must produce a clean,
 timestamped transcript with no hallucinated outro, and a recording with both
 sides enabled must land as two WAVs plus a `-conversation.txt` in
-`~/Documents/Transcriber/recordings/`.
+`~/Documents/Transcriber/recordings/`. Summarizing that transcript must produce
+a `-summary.md` with real content (which also exercises the bundled `llama-cli`
+and its Metal embed).
 
 `make install` + renaming Homebrew's ffmpeg proves self-containment: the
 installed app must still transcribe, because the sidecar is doing the decoding.

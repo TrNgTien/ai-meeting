@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import ImportZone, { pickAudioFiles } from "./ImportZone";
-import { StopIcon, UploadIcon } from "./icons";
+import { RetryIcon, SparklesIcon, StopIcon, UploadIcon } from "./icons";
 import { ChunkProgress, progressView } from "./lib/progress";
 
 /** Mirrors app.py's _handle_ui_event (app.py:1360-1477): status line, saved
@@ -17,6 +17,8 @@ export default function TranscriptPane({
   onImport,
   onJobDone,
   onCancel,
+  onSummarize,
+  canSummarize,
 }: {
   running: boolean;
   /** A meeting is being recorded: importing is blocked, and the empty state
@@ -25,17 +27,25 @@ export default function TranscriptPane({
   onImport: (paths: string[]) => void;
   onJobDone: () => void;
   onCancel: () => void;
+  onSummarize: (path: string) => void;
+  canSummarize: boolean;
 }) {
   const [status, setStatus] = useState("");
   const [text, setText] = useState("");
   const [preview, setPreview] = useState("");
   const [stopping, setStopping] = useState(false);
+  // The last run hit an error or was stopped, so re-running it is worth
+  // offering next to "Import more files…".
+  const [incomplete, setIncomplete] = useState(false);
   const [progress, setProgress] = useState<ChunkProgress | null>(null);
   // Ticks once a second purely so the ETA counts down between chunks, which
   // arrive only every ~5 minutes.
   const [now, setNow] = useState(() => Date.now());
   const baseline = useRef(0);
   const startedAt = useRef(Date.now());
+  // The on-disk transcript this pane is showing, so the Summarize action knows
+  // what to feed the LLM. Set from merged_text (recordings) and batch_done.
+  const transcriptPath = useRef<string | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const view = progressView(progress, now);
 
@@ -44,16 +54,30 @@ export default function TranscriptPane({
     if (paths.length > 0) onImport(paths);
   }
 
+  /** Back to the empty state — the drag-and-drop zone — instead of straight
+   * into the native picker, so a failed run can be replaced by dragging a
+   * different file in. */
+  function handleReset() {
+    setText("");
+    setPreview("");
+    setStatus("");
+    setProgress(null);
+    setIncomplete(false);
+    transcriptPath.current = null;
+  }
+
   // A fresh job (running flips false -> true) supersedes any earlier
   // "Stopping…" state and leftover transcript text from the previous run.
   useEffect(() => {
     if (running) {
       setStopping(false);
+      setIncomplete(false);
       setText("");
       setPreview("");
       setProgress(null);
       baseline.current = 0;
       startedAt.current = Date.now();
+      transcriptPath.current = null;
     }
   }, [running]);
 
@@ -100,6 +124,7 @@ export default function TranscriptPane({
           const count = payload.count as number;
           const took = Math.round(payload.elapsed_sec as number);
           const cancelled = Boolean(payload.cancelled);
+          if (cancelled || count === 0) setIncomplete(true);
           const summary = cancelled
             ? `Stopped after ${took}s. ${count} file(s) finished; partial progress saved.`
             : `Done in ${took}s. Transcribed ${count} file(s).`;
@@ -110,6 +135,8 @@ export default function TranscriptPane({
             setText("");
           } else {
             setText((prev) => `${prev}\n${summary}`);
+            const saved = (payload.saved as string[]) ?? [];
+            if (saved.length > 0) transcriptPath.current = saved[saved.length - 1];
           }
           onJobDone();
           break;
@@ -136,11 +163,13 @@ export default function TranscriptPane({
           // it was built from: same content, in the order it was said.
           setPreview("");
           setText(payload.text as string);
+          transcriptPath.current = payload.path as string;
           break;
         case "error": {
           const message = payload.message as string;
           const file = payload.file as string | undefined;
           setText((prev) => `${prev}\n[error${file ? ` (${file})` : ""}: ${message}]`);
+          setIncomplete(true);
           break;
         }
       }
@@ -192,16 +221,38 @@ export default function TranscriptPane({
           </button>
         </div>
       )}
-      {!running && text && (
+      {!running && (text || status) && (
         <div className="status-line">
           <span>{status}</span>
-          <button className="import-more-btn" onClick={handleImportMore}>
-            <UploadIcon />
-            Import more files…
-          </button>
+          <span className="status-actions">
+            {transcriptPath.current && (
+              <button
+                className="summarize-btn"
+                onClick={() => onSummarize(transcriptPath.current!)}
+                disabled={!canSummarize}
+                title={
+                  canSummarize
+                    ? "Summarize this transcript with the local LLM"
+                    : "Pick an LLM in Settings first"
+                }
+              >
+                <SparklesIcon /> Summarize
+              </button>
+            )}
+            {/* After a run that produced nothing usable, re-running the same
+                files would fail the same way: clear the pane back to the
+                drop zone so another file can be dragged in. */}
+            <button
+              className="import-more-btn"
+              onClick={incomplete ? handleReset : handleImportMore}
+              title={incomplete ? "Clear this run and choose another file" : "Transcribe more files"}
+            >
+              {incomplete ? <RetryIcon /> : <UploadIcon />}
+              {incomplete ? "Try another file…" : "Import more files…"}
+            </button>
+          </span>
         </div>
       )}
-      {!running && !text && <div className="status-line">{status}</div>}
       {!running && !recording && !text ? (
         <div className="transcript-empty">
           <p className="muted">No transcript yet — import an audio file to get started.</p>

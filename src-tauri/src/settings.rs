@@ -30,6 +30,15 @@ pub struct Settings {
     /// A cpal device id, stable across launches — which is why remembering it
     /// is worth anything (the Python app's PortAudio index was not).
     pub mic_device_id: Option<String>,
+    /// The LLM used for summarization: a catalog id from
+    /// [`crate::summarize::models::LLM_OPTIONS`], or [`CUSTOM_LLM`] to use the
+    /// two fields below. `#[serde(default)]` keeps old settings files loading.
+    pub llm_model: String,
+    /// A Hugging Face repo + GGUF file for a model not in the catalog.
+    pub llm_custom_repo: Option<String>,
+    pub llm_custom_file: Option<String>,
+    /// Auto-summarise a recording after its merge completes.
+    pub summarize_after_recording: bool,
 }
 
 impl Default for Settings {
@@ -40,6 +49,10 @@ impl Default for Settings {
             record_mic: true,
             record_system: true,
             mic_device_id: None,
+            llm_model: crate::summarize::models::DEFAULT_LLM.to_string(),
+            llm_custom_repo: None,
+            llm_custom_file: None,
+            summarize_after_recording: false,
         }
     }
 }
@@ -88,6 +101,12 @@ mod tests {
         // The one place the Rust app disagreed with itself: the frontend
         // defaulted to `small` while the engine's DEFAULT_MODEL was large-v3.
         assert_eq!(settings.model, crate::transcribe::DEFAULT_MODEL);
+        // Summarisation defaults: the catalog's default LLM, no custom pair,
+        // and auto-summarise off.
+        assert_eq!(settings.llm_model, crate::summarize::models::DEFAULT_LLM);
+        assert_eq!(settings.llm_custom_repo, None);
+        assert_eq!(settings.llm_custom_file, None);
+        assert!(!settings.summarize_after_recording);
     }
 
     #[test]
@@ -95,6 +114,12 @@ mod tests {
         let stored: Settings = serde_json::from_str(r#"{"model":"medium"}"#).unwrap();
         assert_eq!(stored.model, "medium");
         assert_eq!(stored.language_mode, "vi+en", "missing fields take defaults");
+        assert_eq!(
+            stored.llm_model,
+            crate::summarize::models::DEFAULT_LLM,
+            "the new LLM field defaults rather than failing to parse"
+        );
+        assert!(!stored.summarize_after_recording);
     }
 
     #[test]

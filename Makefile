@@ -1,4 +1,4 @@
-.PHONY: setup ffmpeg dev build test transcribe release install
+.PHONY: setup ffmpeg llama dev build test transcribe release install
 
 .DEFAULT_GOAL := dev
 
@@ -13,7 +13,7 @@
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 
 # Installs whatever is missing: the Rust toolchain, cmake (whisper-rs-sys
-# needs it), the frontend dependencies, and the bundled ffmpeg binaries.
+# needs it), the frontend dependencies, and the bundled ffmpeg + llama-cli.
 setup:
 	@if ! command -v cargo >/dev/null 2>&1; then \
 		echo "==> Rust (cargo) not found, installing via rustup..."; \
@@ -31,6 +31,7 @@ setup:
 	fi
 	pnpm install
 	$(MAKE) ffmpeg
+	$(MAKE) llama
 	@echo ""
 	@echo "==> setup done. If this was the first install of Rust in this"
 	@echo "    shell, restart your terminal (or run: . \"\$$HOME/.cargo/env\")"
@@ -42,6 +43,13 @@ setup:
 # ten minutes the first time. Skips itself once built.
 ffmpeg:
 	./scripts/build-ffmpeg.sh
+
+# The llama-cli the .app bundles for local-LLM transcript summarization, built
+# from source because there is no self-contained signed static macOS build to
+# download. Metal + GGML_METAL_EMBED_LIBRARY=ON, MIT licensed. Skips itself
+# once built.
+llama:
+	./scripts/build-llama.sh
 
 dev: setup
 	pnpm tauri dev

@@ -15,11 +15,13 @@
 pub mod audio;
 pub mod chunking;
 pub mod commands;
+pub mod download;
 pub mod engine;
 pub mod merge;
 pub mod recording;
 pub mod settings;
 pub mod state;
+pub mod summarize;
 pub mod transcribe;
 
 /// Everything upstream of a model runs at 16 kHz mono: it is what Whisper wants,
@@ -51,6 +53,7 @@ pub fn run() {
             commands::start_transcription,
             commands::cancel_job,
             commands::delete_transcript,
+            commands::read_text_file,
             commands::list_input_devices,
             commands::start_recording,
             commands::stop_recording,
@@ -58,6 +61,12 @@ pub fn run() {
             commands::load_settings,
             commands::save_settings,
             commands::ffmpeg_ready,
+            commands::list_llm_models,
+            commands::download_llm_model,
+            commands::delete_llm_model,
+            commands::remote_llm_size,
+            commands::cancel_llm_download,
+            commands::summarize_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Transcriber");

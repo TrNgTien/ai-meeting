@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { RevealIcon, TrashIcon } from "./icons";
+import { RevealIcon, SparklesIcon, TrashIcon } from "./icons";
 
 interface SavedFile {
   path: string;
@@ -25,7 +25,13 @@ function dirname(path: string): string {
  * reveal_button/_reveal_saved, but as a persistent list instead of a button
  * that only knows about the last batch.
  */
-export default function FilesPane() {
+export default function FilesPane({
+  onSummarize,
+  canSummarize,
+}: {
+  onSummarize: (path: string) => void;
+  canSummarize: boolean;
+}) {
   const [files, setFiles] = useState<SavedFile[]>([]);
 
   useEffect(() => {
@@ -70,6 +76,19 @@ export default function FilesPane() {
             <div className="file-path">{dirname(file.path)}</div>
           </div>
           <div className="file-actions">
+            <button
+              className="icon-btn"
+              onClick={() => onSummarize(file.path)}
+              disabled={!canSummarize}
+              title={
+                canSummarize
+                  ? "Summarize this transcript with the local LLM"
+                  : "Pick an LLM in Settings first"
+              }
+              aria-label="Summarize transcript"
+            >
+              <SparklesIcon />
+            </button>
             <button
               className="icon-btn"
               onClick={() => revealItemInDir(file.path)}

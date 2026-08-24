@@ -4,16 +4,18 @@ import { listen } from "@tauri-apps/api/event";
 import EngineControls, { EngineState } from "./EngineControls";
 import RecordBar, { RecordOptions } from "./RecordBar";
 import TranscriptPane from "./TranscriptPane";
+import SummaryPane from "./SummaryPane";
 import SettingsPane from "./SettingsPane";
 import FilesPane from "./FilesPane";
 import ImportDialog from "./ImportDialog";
 import ModelManagerDialog from "./ModelManagerDialog";
 import ModelDownloadPrompt from "./ModelDownloadPrompt";
-import { GearIcon, DocIcon, FolderIcon } from "./icons";
+import { GearIcon, DocIcon, FolderIcon, SparklesIcon } from "./icons";
 import { useModels } from "./lib/models";
+import { useLlmModels } from "./lib/llm";
 import { useSettings } from "./lib/settings";
 
-type Tab = "transcript" | "files" | "settings";
+type Tab = "transcript" | "files" | "settings" | "summary";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("transcript");
@@ -43,26 +45,32 @@ export default function App() {
     [saveSettings]
   );
   const [jobId, setJobId] = useState<string | null>(null);
+  const [transcribing, setTranscribing] = useState(false);
   const [recording, setRecording] = useState(false);
   // Every format the app accepts is decoded by the bundled ffmpeg, so a damaged
   // install can do nothing at all. Better said once at launch than discovered
   // by an import that fails after the meeting is over.
   const [decoderMissing, setDecoderMissing] = useState(false);
   const { models, refresh: refreshModels } = useModels();
+  const { models: llmModels, refresh: refreshLlmModels } = useLlmModels();
   const [managingModels, setManagingModels] = useState(false);
   const [pendingImport, setPendingImport] = useState<string[] | null>(null);
   const [downloadingPending, setDownloadingPending] = useState(false);
+  // A transcript waiting on its LLM GGUF before the summary can start.
+  const [pendingSummarize, setPendingSummarize] = useState<string | null>(null);
+  const [llmDownloading, setLlmDownloading] = useState(false);
 
   // Downloading or deleting a checkpoint changes what the pickers should show.
   useEffect(() => {
     const unlisten = listen<Record<string, unknown>>("engine-event", (event) => {
       const kind = event.payload.event;
       if (kind === "mm_download_finished" || kind === "model_deleted") refreshModels();
+      if (kind === "llm_download_finished" || kind === "llm_deleted") refreshLlmModels();
     });
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [refreshModels]);
+  }, [refreshModels, refreshLlmModels]);
 
   // Default to something usable: a fresh install may only have whatever the
   // user actually downloaded. Only moves off a model that is not on disk, so an
@@ -82,6 +90,7 @@ export default function App() {
     (paths: string[]) => {
       const id = crypto.randomUUID();
       setJobId(id);
+      setTranscribing(true);
       invoke("start_transcription", {
         id,
         paths,
@@ -149,9 +158,26 @@ export default function App() {
         case "rec_stopped": {
           setRecording(false);
           const tracks = [payload.mic_path, payload.system_path].filter(Boolean);
-          if (tracks.length > 0) setJobId(`recording-${payload.stem as string}`);
+          if (tracks.length > 0) {
+            setJobId(`recording-${payload.stem as string}`);
+            setTranscribing(true);
+          }
           break;
         }
+      }
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // A summary job ends with summary_done/summary_failed (not batch_done), so
+  // it clears its own job id here.
+  useEffect(() => {
+    const unlisten = listen<Record<string, unknown>>("engine-event", (event) => {
+      const kind = event.payload.event;
+      if (kind === "summary_done" || kind === "summary_failed") {
+        setJobId(null);
       }
     });
     return () => {
@@ -184,7 +210,68 @@ export default function App() {
 
   const handleJobDone = useCallback(() => {
     setJobId(null);
+    setTranscribing(false);
   }, []);
+
+  const runSummarize = useCallback((path: string) => {
+    const id = crypto.randomUUID();
+    setJobId(id);
+    invoke("summarize_file", { id, path });
+  }, []);
+
+  // Whether the current Summary settings resolve to a usable model. Custom
+  // needs both fields; a catalog id is trusted to be known by the backend
+  // (which reports summary_failed if it is not).
+  const llmConfigured =
+    settings.llm_model !== "custom"
+      ? true
+      : !!(settings.llm_custom_repo?.trim() && settings.llm_custom_file?.trim().endsWith(".gguf"));
+  const canSummarize = jobId === null && llmConfigured;
+
+  const handleSummarize = useCallback(
+    (path: string) => {
+      // Gate a catalog model that is not on disk, the way an import gates a
+      // missing whisper checkpoint. Custom models download on-demand during the
+      // summary itself.
+      if (settings.llm_model !== "custom") {
+        const llm = llmModels.find((m) => m.id === settings.llm_model);
+        if (llm && !llm.downloaded) {
+          setPendingSummarize(path);
+          return;
+        }
+      }
+      runSummarize(path);
+    },
+    [settings.llm_model, llmModels, runSummarize]
+  );
+
+  useEffect(() => {
+    if (!pendingSummarize) return;
+    const unlisten = listen<Record<string, unknown>>("engine-event", (event) => {
+      const payload = event.payload as { event: string } & Record<string, unknown>;
+      if (payload.event === "llm_download_finished" && payload.id === settings.llm_model) {
+        setLlmDownloading(false);
+        if (pendingSummarize) {
+          runSummarize(pendingSummarize);
+          setPendingSummarize(null);
+        }
+      }
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [pendingSummarize, settings.llm_model, runSummarize]);
+
+  const confirmLlmDownload = useCallback(() => {
+    setLlmDownloading(true);
+    invoke("download_llm_model", { id: settings.llm_model });
+  }, [settings.llm_model]);
+
+  const cancelLlmDownload = useCallback(() => {
+    if (llmDownloading) invoke("cancel_llm_download", { id: settings.llm_model });
+    setLlmDownloading(false);
+    setPendingSummarize(null);
+  }, [llmDownloading, settings.llm_model]);
 
   return (
     <div className="app-shell">
@@ -212,6 +299,12 @@ export default function App() {
             onClick={() => setTab("files")}
           >
             <FolderIcon /> Files
+          </button>
+          <button
+            className={tab === "summary" ? "pill active" : "pill"}
+            onClick={() => setTab("summary")}
+          >
+            <SparklesIcon /> Summary
           </button>
         </nav>
         {tab === "transcript" && (
@@ -241,24 +334,38 @@ export default function App() {
         )}
         <div className="content-card">
           <h1 className="content-title">Transcriber</h1>
-          {/* All panes stay mounted so TranscriptPane/FilesPane keep
+          {/* All panes stay mounted so TranscriptPane/FilesPane/SummaryPane keep
               listening for engine events (and keep their accumulated
               state) while another tab is showing, instead of losing
               state/events on every tab switch. */}
           <div className={tab === "transcript" ? "tab-panel" : "tab-panel hidden"}>
             <TranscriptPane
-              running={jobId !== null}
+              running={transcribing}
               recording={recording}
               onImport={handleImport}
               onJobDone={handleJobDone}
               onCancel={handleCancel}
+              onSummarize={handleSummarize}
+              canSummarize={canSummarize}
             />
           </div>
           <div className={tab === "files" ? "tab-panel" : "tab-panel hidden"}>
-            <FilesPane />
+            <FilesPane onSummarize={handleSummarize} canSummarize={canSummarize} />
+          </div>
+          <div className={tab === "summary" ? "tab-panel" : "tab-panel hidden"}>
+            <SummaryPane
+              onCancel={handleCancel}
+              onSummarize={handleSummarize}
+              canSummarize={canSummarize}
+            />
           </div>
           <div className={tab === "settings" ? "tab-panel" : "tab-panel hidden"}>
-            <SettingsPane engine={engine} models={models} onEngineChange={setEngine} />
+            <SettingsPane
+              settings={settings}
+              models={models}
+              llmModels={llmModels}
+              update={saveSettings}
+            />
           </div>
         </div>
       </div>
@@ -278,6 +385,16 @@ export default function App() {
           downloading={downloadingPending}
           onConfirm={confirmModelDownload}
           onCancel={cancelModelDownload}
+        />
+      )}
+      {pendingSummarize && (
+        <ModelDownloadPrompt
+          model={settings.llm_model}
+          downloading={llmDownloading}
+          onConfirm={confirmLlmDownload}
+          onCancel={cancelLlmDownload}
+          sizeCommand="remote_llm_size"
+          keyField="id"
         />
       )}
     </div>

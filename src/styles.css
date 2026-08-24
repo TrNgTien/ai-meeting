@@ -392,6 +392,130 @@ body {
   font-size: 14px;
 }
 
+/* Summary (SummaryPane.tsx) — the streamed local-LLM meeting summary. */
+.summary-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.summary-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.summary-empty .muted {
+  max-width: 40ch;
+}
+
+.inline-icon {
+  display: inline-block;
+  vertical-align: -2px;
+  width: 14px;
+  height: 14px;
+}
+
+.summary-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+  margin-bottom: 0.5rem;
+}
+
+.summary-status .running-stop-btn {
+  margin-left: auto;
+}
+
+.summary-open-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.summary-actions .summary-open-actions {
+  margin-left: auto;
+}
+
+.summary-empty .summary-open-actions {
+  justify-content: center;
+  margin-top: 0.75rem;
+}
+
+.summary-error {
+  background: hsl(var(--destructive) / 0.1);
+  color: hsl(var(--destructive));
+  border: 1px solid hsl(var(--destructive) / 0.35);
+  border-radius: calc(var(--radius) - 0.35rem);
+  padding: 0.5rem 0.75rem;
+  font-size: 13px;
+  margin-bottom: 0.5rem;
+}
+
+.summary-box {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.summary-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid hsl(var(--border));
+  margin-top: 0.75rem;
+}
+
+/* Summarize action in the status line and Files rows. */
+.status-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.retry-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.retry-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.summarize-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  border-color: hsl(var(--primary));
+}
+
+.summarize-btn:disabled {
+  opacity: 0.45;
+}
+
+.summarize-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
 /* Settings */
 .settings-pane {
   overflow: auto;
@@ -425,6 +549,49 @@ body {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: hsl(var(--muted-foreground));
+}
+
+.text-input {
+  background: hsl(var(--panel));
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 0.35rem);
+  padding: 0.4rem 0.6rem;
+  font-size: 14px;
+  font-family: inherit;
+  min-width: 260px;
+}
+
+.text-input:focus {
+  outline: none;
+  border-color: hsl(var(--primary));
+  box-shadow: 0 0 0 3px hsl(var(--primary) / 0.2);
+}
+
+.custom-llm {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem;
+  margin-top: 0.5rem;
+  background: hsl(var(--rail));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 0.35rem);
+}
+
+.hint-text {
+  margin: 0;
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  font-size: 14px;
+  cursor: pointer;
 }
 
 select {
@@ -628,6 +795,21 @@ button:disabled {
   background: hsl(var(--primary) / 0.15);
   color: hsl(var(--primary));
   font-size: 11px;
+  font-weight: 600;
+}
+
+.model-badge.suggested {
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+}
+
+.dropdown-badge {
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+  font-size: 10px;
   font-weight: 600;
 }
 

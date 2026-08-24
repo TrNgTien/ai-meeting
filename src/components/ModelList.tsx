@@ -11,10 +11,13 @@ interface DownloadProgress {
 
 /** Model rows with download/cancel/delete actions.
  *
- * Shared by the Settings tab and the Manage-models dialog opened from the
- * engine bar, so both show the same in-flight downloads. The list itself is
- * `App`'s single `useModels` subscription passed down; only download progress
- * (mm_progress / mm_download_finished, see engine.rs) is local.
+ * Shared by the Settings tab, the Manage-models dialog, and the LLM list in
+ * the Summary settings. The commands and event names are parameterised because
+ * the whisper checkpoints are identified by `name` and the LLM GGUFs by `id`:
+ * the two differ only in the command/payload keys, not in the behaviour.
+ *
+ * The list itself is the caller's single subscription passed down; only download
+ * progress (mm_progress / mm_download_finished, see engine.rs) is local.
  *
  * Delete is two-step — the button flips to "Confirm" — because a mis-click
  * costs a multi-GB re-download.
@@ -22,10 +25,26 @@ interface DownloadProgress {
 export default function ModelList({
   models,
   active,
+  downloadCommand = "download_model",
+  deleteCommand = "delete_model",
+  cancelCommand = "cancel_download",
+  progressEvent = "mm_progress",
+  finishedEvent = "mm_download_finished",
+  keyField = "name",
+  suggested,
 }: {
   models: ModelInfo[];
-  /** Name of the model the engine is set to; marked so it is not deleted blind. */
+  /** Id of the model the engine is set to; marked so it is not deleted blind. */
   active?: string;
+  /** Id of the model to recommend, marked so the accurate default is visible
+   * next to the faster-but-worse ones. */
+  suggested?: string;
+  downloadCommand?: string;
+  deleteCommand?: string;
+  cancelCommand?: string;
+  progressEvent?: string;
+  finishedEvent?: string;
+  keyField?: "name" | "id";
 }) {
   const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -34,7 +53,7 @@ export default function ModelList({
     const unlisten = listen<Record<string, unknown>>("engine-event", (event) => {
       const payload = event.payload;
       switch (payload.event) {
-        case "mm_progress": {
+        case progressEvent: {
           const { model, downloaded, total } = payload as unknown as {
             model: string;
             downloaded: number;
@@ -43,11 +62,11 @@ export default function ModelList({
           setProgress((prev) => ({ ...prev, [model]: { downloaded, total } }));
           break;
         }
-        case "mm_download_finished": {
-          const { name } = payload as unknown as { name: string };
+        case finishedEvent: {
+          const key = (payload as unknown as Record<string, unknown>)[keyField] as string;
           setProgress((prev) => {
             const next = { ...prev };
-            delete next[name];
+            delete next[key];
             return next;
           });
           break;
@@ -57,22 +76,26 @@ export default function ModelList({
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, []);
+  }, [progressEvent, finishedEvent, keyField]);
+
+  const keyOf = (model: ModelInfo) => (keyField === "id" ? model.name : model.name);
 
   return (
     <ul className="model-list">
       {models.map((model) => {
-        const inFlight = progress[model.name];
+        const key = keyOf(model);
+        const inFlight = progress[key];
         const pct =
           inFlight && inFlight.total > 0
             ? Math.round((inFlight.downloaded / inFlight.total) * 100)
             : null;
         return (
-          <li key={model.name} className="model-row">
+          <li key={key} className="model-row">
             <div className="model-row-main">
               <span className={`dot ${model.downloaded ? "ready" : "missing"}`} />
               <span className="model-name">{model.name}</span>
-              {model.name === active && <span className="model-badge">in use</span>}
+              {key === active && <span className="model-badge">in use</span>}
+              {key === suggested && <span className="model-badge suggested">suggested</span>}
               <span className="model-size">
                 {model.downloaded ? formatSize(model.size_bytes) : "not downloaded"}
               </span>
@@ -90,17 +113,17 @@ export default function ModelList({
                       {pct !== null && ` (${pct}%)`}
                     </span>
                   </div>
-                  <button onClick={() => invoke("cancel_download", { name: model.name })}>
+                  <button onClick={() => invoke(cancelCommand, { [keyField]: key })}>
                     Cancel
                   </button>
                 </>
               ) : model.downloaded ? (
-                confirming === model.name ? (
+                confirming === key ? (
                   <>
                     <button
                       className="danger"
                       onClick={() => {
-                        invoke("delete_model", { name: model.name });
+                        invoke(deleteCommand, { [keyField]: key });
                         setConfirming(null);
                       }}
                     >
@@ -113,7 +136,7 @@ export default function ModelList({
                     className="icon-button"
                     title={`Delete ${model.name}`}
                     aria-label={`Delete ${model.name}`}
-                    onClick={() => setConfirming(model.name)}
+                    onClick={() => setConfirming(key)}
                   >
                     <TrashIcon />
                   </button>
@@ -121,7 +144,7 @@ export default function ModelList({
               ) : (
                 <button
                   className="primary"
-                  onClick={() => invoke("download_model", { name: model.name })}
+                  onClick={() => invoke(downloadCommand, { [keyField]: key })}
                 >
                   Download
                 </button>

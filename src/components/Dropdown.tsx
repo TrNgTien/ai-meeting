@@ -8,6 +8,8 @@ export interface DropdownOption {
   hint?: string;
   /** Dot colour in front of the label; omit for options with no state. */
   status?: "ready" | "missing";
+  /** Pill after the label, e.g. "suggested" on the recommended model. */
+  badge?: string;
 }
 
 /** Listbox dropdown replacing the native `<select>`.
@@ -121,6 +123,7 @@ export default function Dropdown({
             <>
               {selected.status && <span className={`dot ${selected.status}`} />}
               {selected.label}
+              {selected.badge && <span className="dropdown-badge">{selected.badge}</span>}
             </>
           ) : (
             <span className="dropdown-placeholder">{placeholder}</span>
@@ -146,6 +149,7 @@ export default function Dropdown({
               </span>
               {option.status && <span className={`dot ${option.status}`} />}
               <span className="dropdown-label">{option.label}</span>
+              {option.badge && <span className="dropdown-badge">{option.badge}</span>}
               {option.hint && <span className="dropdown-hint">{option.hint}</span>}
             </li>
           ))}

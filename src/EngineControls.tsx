@@ -1,5 +1,5 @@
 import Dropdown, { DropdownOption } from "./components/Dropdown";
-import { ModelInfo, formatSize } from "./lib/models";
+import { ModelInfo, SUGGESTED_MODEL, formatSize } from "./lib/models";
 import { SlidersIcon } from "./icons";
 
 export interface EngineState {
@@ -40,6 +40,7 @@ export default function EngineControls({
     label: model.name,
     hint: model.downloaded ? formatSize(model.size_bytes) : "not downloaded",
     status: model.downloaded ? "ready" : "missing",
+    badge: model.name === SUGGESTED_MODEL ? "suggested" : undefined,
   }));
 
   return (

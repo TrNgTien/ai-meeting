@@ -18,10 +18,15 @@ pub use segment::{format_timestamp, segments_to_text, TranscriptSegment};
 /// The multilingual checkpoint used unless the header dropdown says otherwise.
 pub const DEFAULT_MODEL: &str = "large-v3";
 
-/// Checkpoints selectable in the UI for the `vi+en` / `en` / `auto` modes
-/// (pure `vi` always uses PhoWhisper). Ordered roughly fastest -> most
-/// accurate, matching `transcriber.FINAL_MODEL_OPTIONS`.
-pub const MODEL_OPTIONS: &[&str] = &["small", "medium", "large-v2", "large-v3", "large-v3-turbo"];
+/// Checkpoints selectable in the UI for the `vi+en` / `en` / `auto` modes.
+///
+/// Ascending by download size *and* by accuracy, which for these five agree:
+/// large-v3-turbo is a distilled large-v3 (1.6 GB, four decoder layers), so it
+/// belongs between medium and the full 3.1 GB large checkpoints rather than at
+/// the end of the list where its name would put it. The list order is the order
+/// the dropdown and the model list show, so it is what tells a user that
+/// picking further down means slower and more accurate.
+pub const MODEL_OPTIONS: &[&str] = &["small", "medium", "large-v3-turbo", "large-v2", "large-v3"];
 
 /// Called as the engine finishes each decode window, while the chunk it belongs
 /// to is still being transcribed. These are a *preview*: nothing reaching this

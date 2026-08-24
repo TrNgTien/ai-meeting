@@ -8,6 +8,12 @@ export interface ModelInfo {
   size_bytes: number;
 }
 
+/** The checkpoint to steer people at — mirrors `transcribe::DEFAULT_MODEL`
+ * (`src-tauri/src/transcribe/mod.rs:19`). The others are real choices, but
+ * large-v3-turbo is a distilled model that makes noticeably more mistakes on
+ * Vietnamese, so the list has to say which one is the accurate default. */
+export const SUGGESTED_MODEL = "large-v3";
+
 export function formatSize(bytes: number): string {
   if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
   return `${Math.round(bytes / 1_000_000)} MB`;

@@ -111,3 +111,21 @@ export function TrashIcon() {
     </svg>
   );
 }
+
+export function SparklesIcon({ className }: { className?: string } = {}) {
+  return (
+    <svg {...common} width={15} height={15} className={className}>
+      <path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8z" />
+      <path d="M5 15l.9 2.1L8 18l-2.1.9L5 21l-.9-2.1L2 18l2.1-.9z" />
+    </svg>
+  );
+}
+
+export function RetryIcon() {
+  return (
+    <svg {...common}>
+      <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+      <path d="M20 4v4h-4" />
+    </svg>
+  );
+}

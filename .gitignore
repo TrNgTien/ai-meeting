@@ -8,6 +8,7 @@ dist-release/
 # Build artefacts of someone else's source; rebuilt by `make setup`.
 src-tauri/binaries/
 .ffmpeg-build/
+.llama-build/
 
 # Transcripts and sample audio stay local by design.
 *.mp4

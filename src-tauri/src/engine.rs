@@ -35,8 +35,13 @@ use crate::chunking::{
 use crate::merge::{conversation_path, merge_transcript_files, MIC_LABEL, SYSTEM_LABEL};
 use crate::recording::recordings_dir;
 use crate::state::{AppState, CancelFlag, LanguageMode, Phase};
+use crate::download::DownloadError;
+use crate::summarize::llama_cli::LlamaCliSummarizer;
+use crate::summarize::models as llm_models;
+use crate::summarize::prompt::{map_system, reduce_system, reduce_user, split_for_map};
+use crate::summarize::Summarizer;
 use crate::transcribe::models::{
-    self, ensure_model_downloaded, is_model_downloaded, DownloadError,
+    self, ensure_model_downloaded, is_model_downloaded,
 };
 use crate::transcribe::whisper_cpp::WhisperCppEngine;
 use crate::transcribe::{format_timestamp, Engine, TranscriptSegment, MODEL_OPTIONS};
@@ -188,7 +193,7 @@ impl EngineHost {
         lang_mode: &str,
         model: String,
     ) {
-        let Some(cancel) = self.claim_job(app, &id) else {
+        let Some(cancel) = self.claim_job(app, &id, Phase::Transcribing) else {
             return;
         };
 
@@ -220,7 +225,7 @@ impl EngineHost {
         model: String,
     ) {
         let id = format!("recording-{}", recording.stem);
-        let Some(cancel) = self.claim_job(app, &id) else {
+        let Some(cancel) = self.claim_job(app, &id, Phase::Transcribing) else {
             return;
         };
 
@@ -235,8 +240,9 @@ impl EngineHost {
     /// Take the single job slot, or tell the frontend why it could not.
     ///
     /// One job at a time is deliberate (see [`Inner::current_job`]); this is
-    /// where both entry points agree on it.
-    fn claim_job<R: Runtime>(&self, app: &AppHandle<R>, id: &str) -> Option<CancelFlag> {
+    /// where every entry point agrees on it. `phase` is what the app is
+    /// reported as being in while the job runs.
+    fn claim_job<R: Runtime>(&self, app: &AppHandle<R>, id: &str, phase: Phase) -> Option<CancelFlag> {
         let mut current = self.inner.current_job.lock();
         if let Some((running, _)) = current.as_ref() {
             emit(
@@ -248,7 +254,7 @@ impl EngineHost {
         }
         let cancel = CancelFlag::new();
         *current = Some((id.to_string(), cancel.clone()));
-        set_phase(app, Phase::Transcribing);
+        set_phase(app, phase);
         Some(cancel)
     }
 
@@ -261,6 +267,110 @@ impl EngineHost {
                 json!({"message": format!("no running job '{id}'")}),
             ),
         }
+    }
+
+    /// The LLM catalog the Summary settings show, each with whether its GGUF is
+    /// on disk. Cheap (a `stat` per model), answered synchronously.
+    pub fn list_llm_models<R: Runtime>(&self, app: &AppHandle<R>) {
+        let models: Vec<Value> = llm_models::LLM_OPTIONS
+            .iter()
+            .map(|model| {
+                json!({
+                    "id": model.id,
+                    "label": model.label,
+                    "downloaded": llm_models::is_downloaded(model.file),
+                    "size_bytes": llm_models::size_on_disk(model.file),
+                })
+            })
+            .collect();
+        emit(app, "llm_models", json!({ "models": models }));
+    }
+
+    /// Fetch an LLM GGUF on a worker thread, reporting `llm_progress` as it
+    /// goes and exactly one `llm_download_finished` however it ends.
+    ///
+    /// `model_id` is a catalog id (the custom pair is downloaded on-demand
+    /// during a summary, not from this list).
+    pub fn download_llm_model<R: Runtime>(&self, app: &AppHandle<R>, model_id: String) {
+        let Some(model) = llm_models::llm_by_id(&model_id) else {
+            emit(
+                app,
+                "llm_download_finished",
+                json!({"id": model_id, "status": "error", "error": "unknown model"}),
+            );
+            return;
+        };
+        let cancel = {
+            let mut downloads = self.inner.downloads.lock();
+            if downloads.contains_key(&model_id) {
+                return;
+            }
+            let cancel = CancelFlag::new();
+            downloads.insert(model_id.clone(), cancel.clone());
+            cancel
+        };
+
+        let app = app.clone();
+        let inner = self.inner.clone();
+        let repo = model.repo.to_string();
+        let file = model.file.to_string();
+        std::thread::spawn(move || {
+            let progress = |name: &str, done: u64, total: u64| {
+                emit(
+                    &app,
+                    "llm_progress",
+                    json!({"model": name, "downloaded": done, "total": total}),
+                );
+            };
+            let result = llm_models::ensure_downloaded(&repo, &file, Some(&progress), Some(&cancel));
+            let finished = match result {
+                Ok(_) => json!({"id": model_id, "status": "done"}),
+                Err(DownloadError::Cancelled) => json!({"id": model_id, "status": "cancelled"}),
+                Err(DownloadError::Other(err)) => {
+                    json!({"id": model_id, "status": "error", "error": err.to_string()})
+                }
+            };
+            inner.downloads.lock().remove(&model_id);
+            emit(&app, "llm_download_finished", finished);
+        });
+    }
+
+    pub fn delete_llm_model<R: Runtime>(&self, app: &AppHandle<R>, model_id: String) {
+        let Some(model) = llm_models::llm_by_id(&model_id) else {
+            return;
+        };
+        llm_models::delete(model.file);
+        emit(app, "llm_deleted", json!({ "id": model_id }));
+    }
+
+    pub fn cancel_llm_download<R: Runtime>(&self, app: &AppHandle<R>, model_id: String) {
+        match self.inner.downloads.lock().get(&model_id) {
+            Some(cancel) => cancel.cancel(),
+            None => emit(
+                app,
+                "error",
+                json!({"message": format!("no LLM download in progress for '{model_id}'")}),
+            ),
+        }
+    }
+
+    /// Summarise a finished transcript. Runs as an ordinary job — same single
+    /// slot, same Stop button — so it serialises against transcription: the
+    /// shared slot is what stops whisper large-v3 (~3.1 GB resident) and a Q8
+    /// GGUF (4.8 GB) from being loaded at the same moment.
+    ///
+    /// Re-reads the `.txt` from disk rather than trusting in-memory state, which
+    /// is what makes "summarise an old transcript" work for free.
+    pub fn summarize_file<R: Runtime>(&self, app: &AppHandle<R>, id: String, path: String) {
+        let Some(cancel) = self.claim_job(app, &id, Phase::Summarizing) else {
+            return;
+        };
+        let app = app.clone();
+        let inner = self.inner.clone();
+        let path = PathBuf::from(path);
+        std::thread::spawn(move || {
+            run_summary(&app, &inner, &path, &cancel);
+        });
     }
 }
 
@@ -429,10 +539,12 @@ fn run_recording<R: Runtime>(
     // separate transcripts: the missing side looks like silence rather than like
     // something that was never transcribed, and there is no way to tell from the
     // file which it was.
+    let mut merged: Option<PathBuf> = None;
     if !cancelled {
         match merge_recording(recording, mic_transcript.as_deref(), system_transcript.as_deref()) {
             Ok(Some(path)) => {
                 saved.push(path.display().to_string());
+                merged = Some(path.clone());
                 // The text rides along with the path: the conversation is the
                 // reason the recording was made, so the pane shows it in place
                 // of the two per-track transcripts it was building up, the way
@@ -449,6 +561,18 @@ fn run_recording<R: Runtime>(
             // would only be one more thing to delete.
             Ok(None) => {}
             Err(err) => emit(app, "error", json!({"message": err.to_string()})),
+        }
+
+        // Auto-summarise the merged conversation, if the user asked for it. The
+        // job slot is still held and `cancel` is still live here, so this
+        // neither races another job nor loses the Stop. A cancelled run skips
+        // the summary, mirroring the rule that a cancelled run skips the merge.
+        if !cancel.is_cancelled() && crate::settings::load().summarize_after_recording {
+            if let Some(conversation) = &merged {
+                if let Some(summarizer) = resolve_summarizer(app, cancel) {
+                    summarize_transcript(app, conversation, &summarizer, cancel);
+                }
+            }
         }
     }
 
@@ -516,6 +640,234 @@ fn recording_header(recording: &Recording) -> String {
         "# Meeting recorded {when} ({})",
         format_elapsed(recording.duration_sec)
     )
+}
+
+/// The thread body behind [`EngineHost::summarize_file`]: resolve the LLM, do
+/// the summary, then release the job slot on every path.
+fn run_summary<R: Runtime>(
+    app: &AppHandle<R>,
+    inner: &Inner,
+    path: &Path,
+    cancel: &CancelFlag,
+) {
+    if let Some(summarizer) = resolve_summarizer(app, cancel) {
+        summarize_transcript(app, path, &summarizer, cancel);
+    }
+    finish_job(app, inner);
+}
+
+/// Resolve the saved LLM selection, download its GGUF if needed, and build the
+/// sidecar summarizer.
+///
+/// `None` when the selection is unusable or the download failed — the failure
+/// has already been reported on the `summary_failed`/`llm_*` events by then.
+fn resolve_summarizer<R: Runtime>(
+    app: &AppHandle<R>,
+    cancel: &CancelFlag,
+) -> Option<LlamaCliSummarizer> {
+    let settings = crate::settings::load();
+    let Some(selection) = llm_models::resolve(
+        &settings.llm_model,
+        settings.llm_custom_repo.as_deref(),
+        settings.llm_custom_file.as_deref(),
+    ) else {
+        emit(
+            app,
+            "summary_failed",
+            json!({"message": "the selected LLM is invalid — check the Summary settings"}),
+        );
+        return None;
+    };
+
+    // A summary may need a model that is not on disk yet. Reported on the LLM
+    // download events (with a status line), exactly like a first-use whisper
+    // download — and cancellable through the same shared flag.
+    if !llm_models::is_downloaded(&selection.file) {
+        emit(
+            app,
+            "status",
+            json!({"message": format!("Downloading '{}' (one-time, first use)…", selection.label)}),
+        );
+    }
+    let progress = |name: &str, done: u64, total: u64| {
+        emit(
+            app,
+            "llm_progress",
+            json!({"model": name, "downloaded": done, "total": total}),
+        );
+    };
+    let model_path = match llm_models::ensure_downloaded(
+        &selection.repo,
+        &selection.file,
+        Some(&progress),
+        Some(cancel),
+    ) {
+        Ok(path) => path,
+        Err(DownloadError::Cancelled) => {
+            emit(
+                app,
+                "summary_failed",
+                json!({"message": "summarisation cancelled"}),
+            );
+            return None;
+        }
+        Err(DownloadError::Other(err)) => {
+            emit(
+                app,
+                "llm_download_finished",
+                json!({"id": selection.model_id, "status": "error", "error": err.to_string()}),
+            );
+            emit(app, "summary_failed", json!({"message": err.to_string()}));
+            return None;
+        }
+    };
+    emit(
+        app,
+        "llm_download_finished",
+        json!({"id": selection.model_id, "status": "done"}),
+    );
+
+    if cancel.is_cancelled() {
+        return None;
+    }
+
+    emit(
+        app,
+        "status",
+        json!({"message": format!("Summarising with {}", selection.label)}),
+    );
+    Some(LlamaCliSummarizer::new(
+        model_path,
+        selection.model_id,
+        selection.context,
+    ))
+}
+
+/// Summarise one transcript file into `<stem>-summary.md`, emitting summary
+/// events as it goes. Blocks the calling (job) thread; honours `cancel` between
+/// model generations so Stop lands cleanly without a summary file.
+///
+/// Takes the [`Summarizer`] as a parameter so tests can drive the map-reduce
+/// with a stub instead of a real model.
+fn summarize_transcript<R: Runtime>(
+    app: &AppHandle<R>,
+    path: &Path,
+    summarizer: &dyn Summarizer,
+    cancel: &CancelFlag,
+) {
+    emit(
+        app,
+        "summary_started",
+        json!({"source": path.display().to_string(), "model": summarizer.key()}),
+    );
+
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => {
+            emit(
+                app,
+                "summary_failed",
+                json!({"message": format!("cannot read {}: {err}", path.display())}),
+            );
+            return;
+        }
+    };
+    if text.trim().is_empty() {
+        emit(
+            app,
+            "summary_failed",
+            json!({"message": "the transcript is empty — nothing to summarise"}),
+        );
+        return;
+    }
+
+    let language = LanguageMode::parse(&crate::settings::load().language_mode);
+
+    // Map-reduce. A single chunk skips the reduce.
+    let chunks = split_for_map(&text, crate::summarize::char_budget(summarizer.context()));
+    let total = chunks.len();
+    emit(
+        app,
+        "summary_progress",
+        json!({"stage": "map", "done": 0, "total": total}),
+    );
+
+    let mut partials: Vec<String> = Vec::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return;
+        }
+        emit(
+            app,
+            "summary_progress",
+            json!({"stage": "map", "done": index, "total": total}),
+        );
+        let token_sink = |token: &str| {
+            emit(app, "summary_token", json!({"text": token}));
+        };
+        match summarizer.generate(&map_system(language), chunk, Some(&token_sink), cancel) {
+            Ok(partial) => partials.push(partial),
+            Err(crate::summarize::SummarizeError::Cancelled) => return,
+            Err(crate::summarize::SummarizeError::Other(err)) => {
+                emit(app, "summary_failed", json!({"message": err.to_string()}));
+                return;
+            }
+        }
+    }
+
+    let summary = if total <= 1 {
+        partials.pop().unwrap_or_default()
+    } else {
+        emit(
+            app,
+            "summary_progress",
+            json!({"stage": "reduce", "done": 0, "total": 1}),
+        );
+        if cancel.is_cancelled() {
+            return;
+        }
+        let token_sink = |token: &str| {
+            emit(app, "summary_token", json!({"text": token}));
+        };
+        match summarizer.generate(
+            &reduce_system(language),
+            &reduce_user(&partials),
+            Some(&token_sink),
+            cancel,
+        ) {
+            Ok(summary) => summary,
+            Err(crate::summarize::SummarizeError::Cancelled) => return,
+            Err(crate::summarize::SummarizeError::Other(err)) => {
+                emit(app, "summary_failed", json!({"message": err.to_string()}));
+                return;
+            }
+        }
+    };
+
+    if cancel.is_cancelled() {
+        return;
+    }
+
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let out = crate::summarize::summary_path(&dir, &stem);
+    if let Err(err) = std::fs::write(&out, &summary) {
+        emit(
+            app,
+            "summary_failed",
+            json!({"message": format!("cannot write {}: {err}", out.display())}),
+        );
+        return;
+    }
+
+    emit(
+        app,
+        "summary_done",
+        json!({"path": out.display().to_string(), "text": summary}),
+    );
 }
 
 /// One file, start to finish. Returns where the transcript was written.
@@ -845,5 +1197,125 @@ mod tests {
         host.cancel_download(&app, "large-v3".into());
         let event = next_event(&rx, "error");
         assert!(event["message"].as_str().unwrap().contains("large-v3"));
+    }
+
+    /// A summarizer that answers without running anything, the way `StubEngine`
+    /// stands in for whisper in the chunk tests.
+    struct StubSummarizer {
+        key: String,
+    }
+
+    impl StubSummarizer {
+        fn new(key: &str) -> Self {
+            Self { key: key.to_string() }
+        }
+    }
+
+    impl crate::summarize::Summarizer for StubSummarizer {
+        fn key(&self) -> String {
+            self.key.clone()
+        }
+
+        fn context(&self) -> u32 {
+            4096
+        }
+
+        fn generate(
+            &self,
+            _system: &str,
+            user: &str,
+            on_token: Option<&crate::summarize::TokenSink<'_>>,
+            _cancel: &CancelFlag,
+        ) -> Result<String, crate::summarize::SummarizeError> {
+            if let Some(sink) = on_token {
+                sink(user);
+            }
+            Ok(format!("summary of: {user}"))
+        }
+    }
+
+    fn long_transcript(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("meeting.txt");
+        let mut text = String::new();
+        for i in 0..150 {
+            text.push_str(&format!(
+                "[00:{:02}:00] Dòng nội dung thứ {i} với một chút chữ dài thêm cho đủ kích thước mỗi dòng\n",
+                i % 60
+            ));
+        }
+        std::fs::write(&path, &text).unwrap();
+        path
+    }
+
+    /// Wait up to `timeout` for an event named `name`; false when it never
+    /// arrives (used to assert the *absence* of `summary_done` on cancel).
+    fn has_event(rx: &Receiver<Value>, name: &str, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(deadline - std::time::Instant::now()) {
+                Ok(event) if event["event"] == name => return true,
+                Ok(_) => continue,
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn a_summary_streams_tokens_and_ends_with_done() {
+        let (app, rx) = harness();
+        let dir = tempfile::tempdir().unwrap();
+        let path = long_transcript(dir.path());
+
+        let stub = StubSummarizer::new("gemma-stub");
+        summarize_transcript(&app, &path, &stub, &CancelFlag::new());
+
+        let started = next_event(&rx, "summary_started");
+        assert_eq!(started["source"], path.display().to_string());
+        assert_eq!(started["model"], "gemma-stub");
+
+        let progress = next_event(&rx, "summary_progress");
+        assert_eq!(progress["stage"], "map");
+        assert!(
+            progress["total"].as_u64().unwrap() >= 2,
+            "a long transcript maps to several chunks"
+        );
+
+        // Tokens stream before the whole summary lands.
+        let token = next_event(&rx, "summary_token");
+        assert!(token["text"].as_str().unwrap().contains("Dòng"));
+
+        let done = next_event(&rx, "summary_done");
+        let summary_path = done["path"].as_str().unwrap();
+        assert!(summary_path.ends_with("meeting-summary.md"), "{summary_path}");
+        assert!(done["text"].as_str().unwrap().contains("summary of:"));
+        assert!(
+            std::fs::read_to_string(summary_path)
+                .unwrap()
+                .contains("summary of:"),
+            "the summary file is written next to the transcript"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_summary_produces_no_done() {
+        let (app, rx) = harness();
+        let dir = tempfile::tempdir().unwrap();
+        let path = long_transcript(dir.path());
+
+        let cancel = CancelFlag::new();
+        cancel.cancel();
+        summarize_transcript(&app, &path, &StubSummarizer::new("gemma-stub"), &cancel);
+
+        let started = next_event(&rx, "summary_started");
+        assert_eq!(started["source"], path.display().to_string());
+        assert!(
+            !has_event(&rx, "summary_done", Duration::from_millis(500)),
+            "a cancelled summary must not claim a result"
+        );
+        assert!(
+            !dir.path().join("meeting-summary.md").exists(),
+            "a cancelled summary leaves no file behind"
+        );
     }
 }

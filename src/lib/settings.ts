@@ -7,6 +7,10 @@ export interface Settings {
   record_mic: boolean;
   record_system: boolean;
   mic_device_id: string | null;
+  llm_model: string;
+  llm_custom_repo: string | null;
+  llm_custom_file: string | null;
+  summarize_after_recording: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -15,6 +19,10 @@ const DEFAULTS: Settings = {
   record_mic: true,
   record_system: true,
   mic_device_id: null,
+  llm_model: "gemma-3n-E2B-it-Q4_K_M",
+  llm_custom_repo: null,
+  llm_custom_file: null,
+  summarize_after_recording: false,
 };
 
 /** The choices that survive a relaunch.

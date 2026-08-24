@@ -14,7 +14,6 @@ use crate::engine::{emit, EngineHost};
 use crate::recording::{parse_backend, recordings_dir, LiveLevels, RecordingHost};
 use crate::settings::{self, Settings};
 use crate::state::{AppState, Phase};
-
 /// Deletes a saved transcript file from disk. Scoped to `.txt` so the Files
 /// tab's inline delete button can't be pointed at arbitrary paths.
 #[tauri::command]
@@ -24,6 +23,21 @@ pub fn delete_transcript(path: String) -> Result<(), String> {
         return Err("refusing to delete a non-transcript file".into());
     }
     std::fs::remove_file(path).map_err(|e| e.to_string())
+}
+
+/// Reads a saved transcript or summary back into the UI — the "Open…" actions
+/// that let a past run be reopened after the app restarts, since neither pane
+/// persists its list across sessions. Scoped to `.txt`/`.md` the same way
+/// `delete_transcript` is scoped, so the picker can't be pointed at an
+/// arbitrary file.
+#[tauri::command]
+pub fn read_text_file(path: String) -> Result<String, String> {
+    let path = std::path::Path::new(&path);
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("txt") | Some("md") => {}
+        _ => return Err("refusing to open a non-transcript file".into()),
+    }
+    std::fs::read_to_string(path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -82,6 +96,49 @@ pub fn start_transcription(
 #[tauri::command]
 pub fn cancel_job(app: AppHandle, engine: State<EngineHost>, id: String) {
     engine.cancel_job(&app, id);
+}
+
+/// The LLM catalog for the Summary settings, each with its download state.
+#[tauri::command]
+pub fn list_llm_models(app: AppHandle, engine: State<EngineHost>) {
+    engine.list_llm_models(&app);
+}
+
+/// Fetch one catalog LLM's GGUF, reporting `llm_progress` as it goes.
+#[tauri::command]
+pub fn download_llm_model(app: AppHandle, engine: State<EngineHost>, id: String) {
+    engine.download_llm_model(&app, id);
+}
+
+#[tauri::command]
+pub fn delete_llm_model(app: AppHandle, engine: State<EngineHost>, id: String) {
+    engine.delete_llm_model(&app, id);
+}
+
+/// How big a catalog LLM's GGUF is before committing to fetching it.
+#[tauri::command]
+pub async fn remote_llm_size(id: String) -> Option<u64> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let model = crate::summarize::models::llm_by_id(&id)?;
+        crate::summarize::models::remote_size(model.repo, model.file)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Cancels an in-flight LLM GGUF download.
+#[tauri::command]
+pub fn cancel_llm_download(app: AppHandle, engine: State<EngineHost>, id: String) {
+    engine.cancel_llm_download(&app, id);
+}
+
+/// Summarise a finished transcript into `<stem>-summary.md`. Runs as a job
+/// (id matches the one `cancel_job` takes), so it serialises against
+/// transcription and stops through the same Stop button.
+#[tauri::command]
+pub fn summarize_file(app: AppHandle, engine: State<EngineHost>, id: String, path: String) {
+    engine.summarize_file(&app, id, path);
 }
 
 /// The microphones the device picker offers. Answered synchronously — it is a

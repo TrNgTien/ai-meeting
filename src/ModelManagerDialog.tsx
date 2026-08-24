@@ -1,5 +1,5 @@
 import ModelList from "./components/ModelList";
-import { ModelInfo } from "./lib/models";
+import { ModelInfo, SUGGESTED_MODEL } from "./lib/models";
 
 /** Popup opened from the engine bar's "Manage" button — same model rows as the
  * Settings tab, reachable without leaving the Transcript view.
@@ -26,7 +26,7 @@ export default function ModelManagerDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="model-dialog-title">Manage models</h2>
-        <ModelList models={models} active={active} />
+        <ModelList models={models} active={active} suggested={SUGGESTED_MODEL} />
         <button className="import-close" onClick={onClose}>
           Done
         </button>
